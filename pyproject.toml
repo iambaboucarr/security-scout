@@ -56,6 +56,10 @@ style = "semver"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agents", "src/tools", "src/webhooks", "src/config"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/models.py" = "models.py"
+"src/db.py" = "db.py"
+
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 
 [tool.ruff]
@@ -89,7 +93,7 @@ ignore = [
 "tests/**" = ["T20", "ARG", "S"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agents", "tools", "webhooks", "models", "config", "worker", "mcp_server"]
+known-first-party = ["agents", "tools", "webhooks", "models", "db", "config", "worker", "mcp_server"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "typing.Optional".msg = "Use X | None (PEP 604)"
@@ -123,6 +127,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 asyncio_mode = "auto"
 xfail_strict = true
 filterwarnings = ["error"]

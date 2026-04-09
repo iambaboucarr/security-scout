@@ -194,6 +194,7 @@ def configure_logging(log_level: str) -> None:
 
 
 def log_config_loaded(app: AppConfig) -> None:
+    # Pair with `db.log_and_persist_config_loaded` when a DB session exists (ADR-015 Guardrail 6).
     log = structlog.get_logger(__name__)
     log.info(
         "config_loaded",
