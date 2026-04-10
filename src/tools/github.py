@@ -219,6 +219,10 @@ class AdvisoryData(BaseModel):
     html_url: str | None = None
     published_at: datetime | None = None
     updated_at: datetime | None = None
+    cvss_vector: str | None = None
+    cvss_score_api: float | None = None
+    affected_package_name: str | None = None
+    affected_package_ecosystem: str | None = None
 
 
 class PullRequestInfo(BaseModel):
@@ -314,6 +318,41 @@ def _cwe_ids_from_cwes(cwes: object) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _cvss_vector_and_score_from_payload(data: dict[str, Any]) -> tuple[str | None, float | None]:
+    for key in ("cvss", "cvss_v3"):
+        block = data.get(key)
+        if not isinstance(block, dict):
+            continue
+        vs = block.get("vector_string")
+        sc = block.get("score")
+        vector = vs if isinstance(vs, str) and vs.strip() else None
+        score: float | None = None
+        if isinstance(sc, (int, float)):
+            score = float(sc)
+        if vector is not None or score is not None:
+            return vector, score
+    return None, None
+
+
+def _first_affected_package_from_payload(data: dict[str, Any]) -> tuple[str | None, str | None]:
+    vulns = data.get("vulnerabilities")
+    if not isinstance(vulns, list):
+        return None, None
+    for raw in vulns:
+        if not isinstance(raw, dict):
+            continue
+        pkg = raw.get("package")
+        if not isinstance(pkg, dict):
+            continue
+        name = pkg.get("name")
+        eco = pkg.get("ecosystem")
+        name_s = name.strip() if isinstance(name, str) and name.strip() else None
+        eco_s = eco.strip() if isinstance(eco, str) and eco.strip() else None
+        if name_s is not None or eco_s is not None:
+            return name_s, eco_s
+    return None, None
+
+
 def _advisory_from_payload(
     data: dict[str, Any],
     *,
@@ -339,6 +378,8 @@ def _advisory_from_payload(
     sev = severity if isinstance(severity, str) else None
     html = data.get("html_url")
     html_url = html if isinstance(html, str) else None
+    cv_vec, cv_score = _cvss_vector_and_score_from_payload(data)
+    pkg_name, pkg_eco = _first_affected_package_from_payload(data)
 
     return AdvisoryData(
         ghsa_id=ghsa,
@@ -351,6 +392,10 @@ def _advisory_from_payload(
         html_url=html_url,
         published_at=_parse_github_datetime(data.get("published_at")),
         updated_at=_parse_github_datetime(data.get("updated_at")),
+        cvss_vector=cv_vec,
+        cvss_score_api=cv_score,
+        affected_package_name=pkg_name,
+        affected_package_ecosystem=pkg_eco,
     )
 
 
@@ -640,6 +685,40 @@ class GitHubClient:
             finding_id=finding_id,
             workflow_run_id=workflow_run_id,
         )
+
+    async def fetch_repository_contributors_count_upper_bound(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | str | None = None,
+        per_page: int = 100,
+    ) -> tuple[int, bool]:
+        """Return ``(count, is_truncated)`` from the first page of contributors.
+
+        ``is_truncated`` is ``True`` when ``count == per_page`` (more contributors may exist).
+        """
+        o = validate_github_repo_owner(owner)
+        r = validate_github_repo_name(repo)
+        if per_page < 1 or per_page > 100:
+            msg = "per_page must be 1..100 for contributors endpoint"
+            raise ValueError(msg)
+        path = f"/repos/{o}/{r}/contributors"
+        response = await self._request(
+            "GET",
+            path,
+            params={"per_page": per_page},
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        )
+        items = _as_json_array(
+            response,
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        )
+        n = len(items)
+        return n, n >= per_page
 
 
 def _as_json_object(

@@ -86,6 +86,10 @@ async def test_fetch_repository_security_advisory_success() -> None:
         html_url="https://github.com/o/r/security/advisories/GHSA-ABCD-EFGH-IJKL",
         published_at=datetime(2024, 1, 2, 12, 0, tzinfo=UTC),
         updated_at=datetime(2024, 1, 3, 0, 0, tzinfo=UTC),
+        cvss_vector=None,
+        cvss_score_api=None,
+        affected_package_name=None,
+        affected_package_ecosystem=None,
     )
 
 

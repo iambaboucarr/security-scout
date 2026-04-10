@@ -124,6 +124,10 @@ ignore_missing_imports = true
 module = "arq.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "cvss.*"
+ignore_missing_imports = true
+
 # ── Pytest ────────────────────────────────────────────────────────────────────
 
 [tool.pytest.ini_options]
