@@ -44,7 +44,7 @@ _INNER_TAG: dict[ExternalContentKind, str] = {
 
 
 def inner_tags_for_prompt_contract() -> str:
-    """Comma-separated inner tag names for system prompts; stays aligned with framing."""
+    """Comma-separated inner tag names from ``ExternalContentKind`` / ``_INNER_TAG`` for the system prompt."""
     names = sorted(frozenset(_INNER_TAG.values()))
     return ", ".join(f"<{name}>" for name in names)
 
@@ -221,7 +221,6 @@ def prepare_for_llm(
     max_chars: int | None = None,
     truncate_suffix: str = _DEFAULT_TRUNCATE_SUFFIX,
 ) -> str:
-    """Sanitise ``raw_text`` and wrap it for LLM consumption."""
     cleaned = sanitize_text(raw_text, max_chars=max_chars, truncate_suffix=truncate_suffix)
     return frame_external_content(kind, cleaned)
 

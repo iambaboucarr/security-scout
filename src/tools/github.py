@@ -1,7 +1,7 @@
-"""Async GitHub REST read path: advisories, PR metadata, repo metadata.
+"""GitHub REST read API: advisories, PR metadata, repo metadata.
 
-Write operations must enforce ``RepoConfig.mode``; reads are allowed in all modes.
-Uses ``httpx`` async I/O — PyGitHub is synchronous and not used here.
+Uses ``httpx`` (async I/O). PyGitHub is synchronous-only and unused here. Writes must
+respect ``RepoConfig.mode`` (ADR-015); reads are allowed in all modes.
 """
 
 from __future__ import annotations
@@ -343,8 +343,6 @@ def _advisory_from_payload(
 
 
 class GitHubClient:
-    """Async GitHub REST client for read-only repository and global security APIs."""
-
     def __init__(
         self,
         token: str,
