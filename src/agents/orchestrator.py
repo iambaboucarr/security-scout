@@ -1,5 +1,3 @@
-"""Phase 1 advisory workflow: routing, state machine, ADR-018 recovery."""
-
 from __future__ import annotations
 
 import uuid
@@ -123,39 +121,70 @@ async def run_advisory_workflow(
     reasoning_model: str = "claude-sonnet-4-6",
     circuit_breaker: ExternalApiCircuitBreaker | None = None,
     schedule_retry: Callable[[ScheduleRetryParams], Awaitable[None]] | None = None,
+    resume_workflow_run_id: uuid.UUID | None = None,
 ) -> WorkflowRun:
-    """Advisory path: triage then Slack report. Commits across steps for durable retry state (ADR-018)."""
+    """Advisory path: triage then Slack report. Commits across steps for durable retry state.
+
+    When ``resume_workflow_run_id`` is set, continues an existing run (e.g. ARQ delayed retry) instead of
+    creating a new ``WorkflowRun``.
+    """
     log = _LOG.bind(agent="orchestrator", run_id=str(run_id) if run_id else None)
     breaker = circuit_breaker or ExternalApiCircuitBreaker()
 
-    run = WorkflowRun(
-        workflow_type=WorkflowKind.advisory,
-        state=AdvisoryWorkflowState.received.value,
-        retry_count=0,
-        finding_id=None,
-    )
-    session.add(run)
-    await session.flush()
-    run_stable_id = run.id
+    needs_triage: bool
+    run_stable_id: uuid.UUID
 
-    log.info(
-        "workflow_state_transition",
-        metric_name="workflow_state_current",
-        from_state=None,
-        to_state=AdvisoryWorkflowState.received.value,
-        workflow_run_id=str(run_stable_id),
-    )
+    if resume_workflow_run_id is None:
+        run = WorkflowRun(
+            workflow_type=WorkflowKind.advisory,
+            state=AdvisoryWorkflowState.received.value,
+            retry_count=0,
+            finding_id=None,
+        )
+        session.add(run)
+        await session.flush()
+        run_stable_id = run.id
 
-    run.state = AdvisoryWorkflowState.triaging.value
-    await session.commit()
+        log.info(
+            "workflow_state_transition",
+            metric_name="workflow_state_current",
+            from_state=None,
+            to_state=AdvisoryWorkflowState.received.value,
+            workflow_run_id=str(run_stable_id),
+        )
 
-    log.info(
-        "workflow_state_transition",
-        metric_name="workflow_state_current",
-        from_state=AdvisoryWorkflowState.received.value,
-        to_state=AdvisoryWorkflowState.triaging.value,
-        workflow_run_id=str(run_stable_id),
-    )
+        run.state = AdvisoryWorkflowState.triaging.value
+        await session.commit()
+
+        log.info(
+            "workflow_state_transition",
+            metric_name="workflow_state_current",
+            from_state=AdvisoryWorkflowState.received.value,
+            to_state=AdvisoryWorkflowState.triaging.value,
+            workflow_run_id=str(run_stable_id),
+        )
+        needs_triage = True
+    else:
+        loaded = await _require_run(
+            session,
+            resume_workflow_run_id,
+            missing_message="workflow run missing for resume",
+        )
+        if loaded.completed_at is not None:
+            msg = "cannot resume a completed workflow run"
+            raise RuntimeError(msg)
+        if loaded.workflow_type != WorkflowKind.advisory:
+            msg = "resume only supported for advisory workflows"
+            raise RuntimeError(msg)
+        if loaded.state not in (
+            AdvisoryWorkflowState.triaging.value,
+            AdvisoryWorkflowState.triage_complete.value,
+            AdvisoryWorkflowState.reporting.value,
+        ):
+            msg = f"cannot resume from state {loaded.state!r}"
+            raise RuntimeError(msg)
+        run_stable_id = loaded.id
+        needs_triage = loaded.state == AdvisoryWorkflowState.triaging.value
 
     for api in ("github", "slack"):
         if breaker.take_resume_log_event(api):
@@ -169,219 +198,246 @@ async def run_advisory_workflow(
             )
             await session.commit()
 
-    blocked_gh = breaker.blocked_seconds_remaining("github")
-    if blocked_gh > 0:
-        await _append_action_log(
-            session,
-            workflow_run_id=run_stable_id,
-            agent="orchestrator",
-            tool_name="circuit_breaker",
-            tool_inputs={"api": "github", "blocked_seconds": blocked_gh},
-            tool_output="API paused; deferring workflow",
-        )
-        await session.commit()
-        if schedule_retry is None:
-            msg = "schedule_retry is required when the GitHub API circuit is open"
-            raise RuntimeError(msg)
-        await schedule_retry(
-            ScheduleRetryParams(
-                workflow_run_id=run_stable_id,
-                delay_seconds=blocked_gh,
-                state=AdvisoryWorkflowState.triaging.value,
-                reason="github_circuit_blocked",
-            ),
-        )
-        return await _require_run(
-            session,
-            run_stable_id,
-            missing_message="workflow run missing after GitHub circuit deferral",
-        )
-
     finding: Finding | None = None
-    try:
-        finding = await run_advisory_triage(
-            session,
-            repo,
-            gh,
-            http,
-            ghsa_id=ghsa_id,
-            advisory_source=advisory_source,
-            run_id=run_id,
-            workflow_run_id=run_stable_id,
-            anthropic_client=anthropic_client,
-            reasoning_model=reasoning_model,
-        )
-    except GitHubAPIError as e:
-        await session.rollback()
-        opened = breaker.record_failure("github")
-        if opened:
+
+    if needs_triage:
+        blocked_gh = breaker.blocked_seconds_remaining("github")
+        if blocked_gh > 0:
             await _append_action_log(
                 session,
                 workflow_run_id=run_stable_id,
                 agent="orchestrator",
                 tool_name="circuit_breaker",
-                tool_inputs={"api": "github", "event": "opened"},
-                tool_output=f"pause_seconds={breaker.PAUSE_SEC}",
+                tool_inputs={"api": "github", "blocked_seconds": blocked_gh},
+                tool_output="API paused; deferring workflow",
             )
-        run = await _require_run(
-            session,
-            run_stable_id,
-            missing_message="workflow run missing after triage failure",
-        )
-        if e.is_transient and run.retry_count < 3 and schedule_retry is not None:
-            delay = max(1, 2**run.retry_count)
-            run.retry_count += 1
+            await session.commit()
+            if schedule_retry is None:
+                msg = "schedule_retry is required when the GitHub API circuit is open"
+                raise RuntimeError(msg)
+            await schedule_retry(
+                ScheduleRetryParams(
+                    workflow_run_id=run_stable_id,
+                    delay_seconds=blocked_gh,
+                    state=AdvisoryWorkflowState.triaging.value,
+                    reason="github_circuit_blocked",
+                ),
+            )
+            return await _require_run(
+                session,
+                run_stable_id,
+                missing_message="workflow run missing after GitHub circuit deferral",
+            )
+
+        try:
+            finding = await run_advisory_triage(
+                session,
+                repo,
+                gh,
+                http,
+                ghsa_id=ghsa_id,
+                advisory_source=advisory_source,
+                run_id=run_id,
+                workflow_run_id=run_stable_id,
+                anthropic_client=anthropic_client,
+                reasoning_model=reasoning_model,
+            )
+        except GitHubAPIError as e:
+            await session.rollback()
+            opened = breaker.record_failure("github")
+            if opened:
+                await _append_action_log(
+                    session,
+                    workflow_run_id=run_stable_id,
+                    agent="orchestrator",
+                    tool_name="circuit_breaker",
+                    tool_inputs={"api": "github", "event": "opened"},
+                    tool_output=f"pause_seconds={breaker.PAUSE_SEC}",
+                )
+            run = await _require_run(
+                session,
+                run_stable_id,
+                missing_message="workflow run missing after triage failure",
+            )
+            if e.is_transient and run.retry_count < 3 and schedule_retry is not None:
+                delay = max(1, 2**run.retry_count)
+                run.retry_count += 1
+                await session.commit()
+                log.warning(
+                    "workflow_transient_retry",
+                    metric_name="workflow_error_total",
+                    phase="triage",
+                    workflow_run_id=str(run_stable_id),
+                    retry_count=run.retry_count,
+                    delay_seconds=delay,
+                )
+                await schedule_retry(
+                    ScheduleRetryParams(
+                        workflow_run_id=run_stable_id,
+                        delay_seconds=delay,
+                        state=AdvisoryWorkflowState.triaging.value,
+                        reason="github_transient",
+                    ),
+                )
+                return run
+            run.state = AdvisoryWorkflowState.error_triage.value
+            run.error_message = _truncate_log(str(e), 4000)
+            run.completed_at = _now_utc()
             await session.commit()
             log.warning(
-                "workflow_transient_retry",
+                "workflow_error",
                 metric_name="workflow_error_total",
                 phase="triage",
                 workflow_run_id=str(run_stable_id),
-                retry_count=run.retry_count,
-                delay_seconds=delay,
+                err=str(e),
             )
-            await schedule_retry(
-                ScheduleRetryParams(
-                    workflow_run_id=run_stable_id,
-                    delay_seconds=delay,
-                    state=AdvisoryWorkflowState.triaging.value,
-                    reason="github_transient",
-                ),
+            await _append_action_log(
+                session,
+                workflow_run_id=run_stable_id,
+                agent="orchestrator",
+                tool_name="triage",
+                tool_inputs={"ghsa_id": ghsa_id},
+                tool_output=str(e),
             )
-            return run
-        run.state = AdvisoryWorkflowState.error_triage.value
-        run.error_message = _truncate_log(str(e), 4000)
-        run.completed_at = _now_utc()
-        await session.commit()
-        log.warning(
-            "workflow_error",
-            metric_name="workflow_error_total",
-            phase="triage",
-            workflow_run_id=str(run_stable_id),
-            err=str(e),
-        )
-        await _append_action_log(
-            session,
-            workflow_run_id=run_stable_id,
-            agent="orchestrator",
-            tool_name="triage",
-            tool_inputs={"ghsa_id": ghsa_id},
-            tool_output=str(e),
-        )
-        await session.commit()
-        await _best_effort_error_slack(
-            slack,
-            repo.slack_channel,
-            title="Advisory triage failed",
-            detail=str(e),
-            workflow_run_id=run_stable_id,
-            finding_id=None,
-        )
-        return run
-    except SecurityScoutError as e:
-        await session.rollback()
-        run = await _require_run(
-            session,
-            run_stable_id,
-            missing_message="workflow run missing after triage failure",
-        )
-        if e.is_transient and run.retry_count < 3 and schedule_retry is not None:
-            delay = max(1, 2**run.retry_count)
-            run.retry_count += 1
             await session.commit()
-            await schedule_retry(
-                ScheduleRetryParams(
-                    workflow_run_id=run_stable_id,
-                    delay_seconds=delay,
-                    state=AdvisoryWorkflowState.triaging.value,
-                    reason="triage_transient",
-                ),
+            await _best_effort_error_slack(
+                slack,
+                repo.slack_channel,
+                title="Advisory triage failed",
+                detail=str(e),
+                workflow_run_id=run_stable_id,
+                finding_id=None,
             )
             return run
-        run.state = AdvisoryWorkflowState.error_triage.value
-        run.error_message = _truncate_log(str(e), 4000)
-        run.completed_at = _now_utc()
-        await session.commit()
-        log.warning(
-            "workflow_error",
-            metric_name="workflow_error_total",
-            phase="triage",
-            workflow_run_id=str(run_stable_id),
-            err=str(e),
-        )
-        await _append_action_log(
-            session,
-            workflow_run_id=run_stable_id,
-            agent="orchestrator",
-            tool_name="triage",
-            tool_inputs={"ghsa_id": ghsa_id},
-            tool_output=str(e),
-        )
-        await session.commit()
-        await _best_effort_error_slack(
-            slack,
-            repo.slack_channel,
-            title="Advisory triage failed",
-            detail=str(e),
-            workflow_run_id=run_stable_id,
-            finding_id=None,
-        )
-        return run
-    except Exception as e:
-        await session.rollback()
+        except SecurityScoutError as e:
+            await session.rollback()
+            run = await _require_run(
+                session,
+                run_stable_id,
+                missing_message="workflow run missing after triage failure",
+            )
+            if e.is_transient and run.retry_count < 3 and schedule_retry is not None:
+                delay = max(1, 2**run.retry_count)
+                run.retry_count += 1
+                await session.commit()
+                await schedule_retry(
+                    ScheduleRetryParams(
+                        workflow_run_id=run_stable_id,
+                        delay_seconds=delay,
+                        state=AdvisoryWorkflowState.triaging.value,
+                        reason="triage_transient",
+                    ),
+                )
+                return run
+            run.state = AdvisoryWorkflowState.error_triage.value
+            run.error_message = _truncate_log(str(e), 4000)
+            run.completed_at = _now_utc()
+            await session.commit()
+            log.warning(
+                "workflow_error",
+                metric_name="workflow_error_total",
+                phase="triage",
+                workflow_run_id=str(run_stable_id),
+                err=str(e),
+            )
+            await _append_action_log(
+                session,
+                workflow_run_id=run_stable_id,
+                agent="orchestrator",
+                tool_name="triage",
+                tool_inputs={"ghsa_id": ghsa_id},
+                tool_output=str(e),
+            )
+            await session.commit()
+            await _best_effort_error_slack(
+                slack,
+                repo.slack_channel,
+                title="Advisory triage failed",
+                detail=str(e),
+                workflow_run_id=run_stable_id,
+                finding_id=None,
+            )
+            return run
+        except Exception as e:
+            await session.rollback()
+            run = await _require_run(
+                session,
+                run_stable_id,
+                missing_message="workflow run missing after triage failure",
+            )
+            run.state = AdvisoryWorkflowState.error_unrecoverable.value
+            run.error_message = _truncate_log(str(e), 4000)
+            run.completed_at = _now_utc()
+            await session.commit()
+            log.exception(
+                "workflow_unrecoverable",
+                metric_name="workflow_error_total",
+                workflow_run_id=str(run_stable_id),
+            )
+            await _append_action_log(
+                session,
+                workflow_run_id=run_stable_id,
+                agent="orchestrator",
+                tool_name="triage",
+                tool_inputs={"ghsa_id": ghsa_id},
+                tool_output=str(e),
+            )
+            await session.commit()
+            await _best_effort_error_slack(
+                slack,
+                repo.slack_channel,
+                title="Advisory workflow failed (unrecoverable)",
+                detail=str(e),
+                workflow_run_id=run_stable_id,
+                finding_id=None,
+            )
+            return run
+
+        if finding is None:
+            msg = "triage produced no finding"
+            raise RuntimeError(msg)
+
         run = await _require_run(
             session,
             run_stable_id,
-            missing_message="workflow run missing after triage failure",
+            missing_message="workflow run missing after triage",
         )
-        run.state = AdvisoryWorkflowState.error_unrecoverable.value
-        run.error_message = _truncate_log(str(e), 4000)
-        run.completed_at = _now_utc()
+        run.finding_id = finding.id
+        run.state = AdvisoryWorkflowState.triage_complete.value
         await session.commit()
-        log.exception(
-            "workflow_unrecoverable",
-            metric_name="workflow_error_total",
+
+        log.info(
+            "workflow_state_transition",
+            metric_name="workflow_state_current",
+            from_state=AdvisoryWorkflowState.triaging.value,
+            to_state=AdvisoryWorkflowState.triage_complete.value,
             workflow_run_id=str(run_stable_id),
         )
-        await _append_action_log(
+    else:
+        run = await _require_run(
             session,
-            workflow_run_id=run_stable_id,
-            agent="orchestrator",
-            tool_name="triage",
-            tool_inputs={"ghsa_id": ghsa_id},
-            tool_output=str(e),
+            run_stable_id,
+            missing_message="workflow run missing before reporting resume",
         )
-        await session.commit()
-        await _best_effort_error_slack(
-            slack,
-            repo.slack_channel,
-            title="Advisory workflow failed (unrecoverable)",
-            detail=str(e),
-            workflow_run_id=run_stable_id,
-            finding_id=None,
-        )
-        return run
-
-    if finding is None:
-        msg = "triage produced no finding"
-        raise RuntimeError(msg)
+        if run.finding_id is None:
+            msg = "resume run has no finding_id"
+            raise RuntimeError(msg)
+        finding = await session.get(Finding, run.finding_id)
+        if finding is None:
+            msg = "finding row missing for workflow resume"
+            raise RuntimeError(msg)
 
     run = await _require_run(
         session,
         run_stable_id,
-        missing_message="workflow run missing after triage",
+        missing_message="workflow run missing before reporting",
     )
-    run.finding_id = finding.id
-    run.state = AdvisoryWorkflowState.triage_complete.value
-    await session.commit()
-
-    log.info(
-        "workflow_state_transition",
-        metric_name="workflow_state_current",
-        from_state=AdvisoryWorkflowState.triaging.value,
-        to_state=AdvisoryWorkflowState.triage_complete.value,
-        workflow_run_id=str(run_stable_id),
-    )
+    if run.state not in (
+        AdvisoryWorkflowState.triage_complete.value,
+        AdvisoryWorkflowState.reporting.value,
+    ):
+        msg = f"unexpected workflow state before reporting: {run.state!r}"
+        raise RuntimeError(msg)
 
     if breaker.take_resume_log_event("slack"):
         await _append_action_log(
@@ -422,16 +478,17 @@ async def run_advisory_workflow(
             missing_message="workflow run missing after Slack circuit deferral",
         )
 
-    run.state = AdvisoryWorkflowState.reporting.value
-    await session.commit()
+    if run.state == AdvisoryWorkflowState.triage_complete.value:
+        run.state = AdvisoryWorkflowState.reporting.value
+        await session.commit()
 
-    log.info(
-        "workflow_state_transition",
-        metric_name="workflow_state_current",
-        from_state=AdvisoryWorkflowState.triage_complete.value,
-        to_state=AdvisoryWorkflowState.reporting.value,
-        workflow_run_id=str(run_stable_id),
-    )
+        log.info(
+            "workflow_state_transition",
+            metric_name="workflow_state_current",
+            from_state=AdvisoryWorkflowState.triage_complete.value,
+            to_state=AdvisoryWorkflowState.reporting.value,
+            workflow_run_id=str(run_stable_id),
+        )
 
     report = finding_to_report_payload(finding)
     try:

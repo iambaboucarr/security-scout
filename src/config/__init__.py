@@ -105,21 +105,29 @@ class ReposManifest(BaseModel):
         return self
 
 
+def _env_file_path() -> Path | None:
+    p = _REPO_ROOT / ".env"
+    return p if p.is_file() else None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_env_file_path(),
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    github_webhook_secret: str
-    github_pat: str
-    slack_bot_token: str
-    slack_signing_secret: str
+    # Dev placeholders so `make run` works without a full `.env`; override for real GitHub/Slack.
+    github_webhook_secret: str = Field(default="dev-local-github-webhook-secret")
+    github_pat: str = Field(default="dev-local-github-pat")
+    slack_bot_token: str = Field(default="xoxb-dev-local-placeholder")
+    slack_signing_secret: str = Field(default="dev-local-slack-signing-secret")
 
     database_url: str = "sqlite+aiosqlite:///./security_scout.db"
     redis_url: str = "redis://localhost:6379"
     log_level: str = "INFO"
+
+    anthropic_api_key: str | None = None
 
     repos_config_path: Path = Field(default=_DEFAULT_REPOS_PATH)
 

@@ -60,6 +60,8 @@ packages = ["src/agents", "src/tools", "src/webhooks", "src/config", "src/ai"]
 "src/models.py" = "models.py"
 "src/db.py" = "db.py"
 "src/exceptions.py" = "exceptions.py"
+"src/main.py" = "main.py"
+"src/worker.py" = "worker.py"
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 

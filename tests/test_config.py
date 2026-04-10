@@ -189,3 +189,10 @@ def test_settings_model_names_from_adr017() -> None:
     assert s.mechanical_model == "claude-haiku-4-5"
     assert s.reasoning_model == "claude-sonnet-4-6"
     assert s.high_stakes_model == "claude-opus-4-6"
+
+
+def test_settings_secret_fields_have_local_dev_defaults() -> None:
+    assert Settings.model_fields["github_webhook_secret"].default == "dev-local-github-webhook-secret"
+    assert Settings.model_fields["github_pat"].default == "dev-local-github-pat"
+    assert Settings.model_fields["slack_bot_token"].default == "xoxb-dev-local-placeholder"
+    assert Settings.model_fields["slack_signing_secret"].default == "dev-local-slack-signing-secret"
