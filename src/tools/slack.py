@@ -13,6 +13,7 @@ from slack_sdk.models.blocks import ContextBlock, DividerBlock, HeaderBlock, Sec
 from slack_sdk.models.blocks.basic_components import MarkdownTextObject, PlainTextObject
 
 from exceptions import SecurityScoutError
+from models import Finding
 
 __all__ = [
     "DedupMatchInfo",
@@ -23,6 +24,7 @@ __all__ = [
     "SlackPostMessageResult",
     "build_finding_blocks",
     "fallback_notification_text",
+    "finding_to_report_payload",
 ]
 
 _LOG = structlog.get_logger(__name__)
@@ -152,6 +154,50 @@ _WS_RE = re.compile(r"\s+")
 def _plain_single_line(text: str) -> str:
     """Collapse whitespace for plain-text / header fields (no literal newlines)."""
     return _WS_RE.sub(" ", text.strip())
+
+
+def finding_to_report_payload(finding: Finding) -> FindingReportPayload:
+    cve_ids: tuple[str, ...] = (finding.cve_id,) if finding.cve_id else ()
+    cwe_ids = tuple(finding.cwe_ids) if finding.cwe_ids else ()
+    dedup: DedupMatchInfo | None = None
+    if finding.duplicate_tracker and finding.duplicate_of:
+        dedup = DedupMatchInfo(
+            tier=1,
+            tracker_name=finding.duplicate_tracker,
+            match_url=finding.duplicate_url,
+            duplicate_of=finding.duplicate_of,
+        )
+    desc_excerpt: str | None = None
+    if finding.description:
+        desc_excerpt = _truncate(_plain_single_line(finding.description), _MAX_DESCRIPTION_EXCERPT)
+    ev_excerpt: str | None = None
+    if finding.evidence:
+        try:
+            raw = json.dumps(finding.evidence, ensure_ascii=False)
+        except TypeError:
+            raw = None
+        except ValueError:
+            raw = None
+        if raw is not None:
+            ev_excerpt = _truncate(raw, _MAX_EVIDENCE_EXCERPT)
+    return FindingReportPayload(
+        finding_id=finding.id,
+        title=finding.title,
+        severity=finding.severity.value,
+        ssvc_action=finding.ssvc_action.value if finding.ssvc_action else None,
+        confidence=finding.triage_confidence,
+        source_url=finding.source_ref,
+        affected_versions=None,
+        cve_ids=cve_ids,
+        cwe_ids=cwe_ids,
+        cvss_score=finding.cvss_score,
+        cvss_vector=finding.cvss_vector,
+        description_excerpt=desc_excerpt,
+        evidence_excerpt=ev_excerpt,
+        poc_type_label=None,
+        reproduction_steps=finding.reproduction,
+        dedup=dedup,
+    )
 
 
 def _slack_link_url(url: str) -> str:
@@ -441,6 +487,98 @@ class SlackClient:
             metric_name="slack_finding_posted",
             channel=ch,
             finding_id=finding_id,
+            workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
+        )
+        return SlackPostMessageResult(channel=ch, message_ts=ts)
+
+    async def notify_workflow_error(
+        self,
+        channel: str,
+        *,
+        title: str,
+        detail: str,
+        workflow_run_id: uuid.UUID | None = None,
+        finding_id: str | None = None,
+    ) -> SlackPostMessageResult:
+        if not channel:
+            msg = "Slack channel is empty"
+            raise ValueError(msg)
+        detail_safe = _truncate(_plain_single_line(detail), 2800)
+        title_plain = _truncate(_plain_single_line(title), 200)
+        parts: list[str] = [f"*Workflow error:* {escape_slack_mrkdwn(title_plain)}"]
+        parts.append(escape_slack_mrkdwn(detail_safe))
+        if workflow_run_id is not None:
+            parts.append(f"*Workflow run:* `{workflow_run_id}`")
+        if finding_id is not None:
+            parts.append(f"*Finding:* `{finding_id}`")
+        body: dict[str, Any] = {
+            "channel": channel,
+            "text": f"Workflow error: {title_plain}",
+            "blocks": [
+                cast(
+                    dict[str, Any], HeaderBlock(text=PlainTextObject(text="Security Scout — workflow error")).to_dict()
+                ),
+                cast(
+                    dict[str, Any],
+                    SectionBlock(text=MarkdownTextObject(text="\n".join(parts))).to_dict(),
+                ),
+            ],
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        client = self._client_or_raise()
+        response = await client.post(
+            "/chat.postMessage",
+            json=body,
+            headers=self._auth_headers(),
+        )
+        fid = finding_id or "none"
+        if not response.is_success:
+            err = SlackAPIError.from_status(
+                response.status_code,
+                response.reason_phrase or f"HTTP {response.status_code}",
+            )
+            _LOG.warning(
+                "slack_api_http_error",
+                metric_name="api_error_total",
+                api="slack",
+                http_status=err.http_status,
+                finding_id=fid,
+                workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
+            )
+            raise err
+        payload = _as_slack_json(
+            response,
+            finding_id=fid,
+            workflow_run_id=workflow_run_id,
+        )
+        if not payload.get("ok"):
+            code = payload.get("error")
+            code_str = code if isinstance(code, str) else "unknown"
+            err = SlackAPIError.from_slack_error(code_str, f"Slack chat.postMessage failed: {code_str}")
+            _LOG.warning(
+                "slack_api_error",
+                metric_name="api_error_total",
+                api="slack",
+                slack_error=code_str,
+                finding_id=fid,
+                workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
+            )
+            raise err
+        ch = payload.get("channel")
+        ts = payload.get("ts")
+        if not isinstance(ch, str) or not isinstance(ts, str):
+            msg = "Slack chat.postMessage response missing channel or ts"
+            raise SlackMalformedResponseError(
+                msg,
+                finding_id=fid,
+                workflow_run_id=workflow_run_id,
+            )
+        _LOG.info(
+            "slack_workflow_error_posted",
+            metric_name="slack_workflow_error_posted",
+            channel=ch,
+            finding_id=fid,
             workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
         )
         return SlackPostMessageResult(channel=ch, message_ts=ts)

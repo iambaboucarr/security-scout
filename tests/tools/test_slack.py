@@ -7,6 +7,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from models import Finding, FindingStatus, Severity, WorkflowKind
 from tools.slack import (
     DedupMatchInfo,
     FindingReportPayload,
@@ -16,6 +17,7 @@ from tools.slack import (
     build_finding_blocks,
     escape_slack_mrkdwn,
     fallback_notification_text,
+    finding_to_report_payload,
 )
 
 
@@ -118,6 +120,43 @@ def test_build_finding_blocks_truncates_long_evidence() -> None:
     assert section_texts
     assert len(section_texts[0]) < 600
     assert section_texts[0].endswith("…")
+
+
+def test_finding_to_report_payload_maps_core_fields() -> None:
+    fid = uuid.uuid4()
+    f = Finding(
+        id=fid,
+        workflow=WorkflowKind.advisory,
+        source_ref="https://github.com/advisories/GHSA-TEST",
+        severity=Severity.high,
+        status=FindingStatus.unconfirmed,
+        title="Test title",
+        cve_id="CVE-2024-1",
+        cwe_ids=["CWE-79"],
+        evidence={"ok": True},
+    )
+    p = finding_to_report_payload(f)
+    assert p.finding_id == fid
+    assert p.title == "Test title"
+    assert p.severity == "high"
+    assert p.cve_ids == ("CVE-2024-1",)
+    assert p.cwe_ids == ("CWE-79",)
+    assert p.evidence_excerpt is not None
+    assert '"ok": true' in p.evidence_excerpt
+
+
+def test_finding_to_report_payload_omits_evidence_when_not_serializable() -> None:
+    f = Finding(
+        id=uuid.uuid4(),
+        workflow=WorkflowKind.advisory,
+        source_ref="https://github.com/advisories/GHSA-TEST",
+        severity=Severity.high,
+        status=FindingStatus.unconfirmed,
+        title="T",
+        evidence={"x": object()},
+    )
+    p = finding_to_report_payload(f)
+    assert p.evidence_excerpt is None
 
 
 def test_build_finding_blocks_includes_dedup_section() -> None:
