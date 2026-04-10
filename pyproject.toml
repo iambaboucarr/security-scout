@@ -54,7 +54,7 @@ vcs = "git"
 style = "semver"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agents", "src/tools", "src/webhooks", "src/config"]
+packages = ["src/agents", "src/tools", "src/webhooks", "src/config", "src/ai"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/models.py" = "models.py"
@@ -94,7 +94,7 @@ ignore = [
 "tests/**" = ["T20", "ARG", "S"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agents", "tools", "webhooks", "models", "db", "exceptions", "config", "worker", "mcp_server"]
+known-first-party = ["agents", "tools", "webhooks", "models", "db", "exceptions", "config", "worker", "mcp_server", "ai"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "typing.Optional".msg = "Use X | None (PEP 604)"
