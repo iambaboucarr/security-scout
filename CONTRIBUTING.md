@@ -11,7 +11,7 @@ We follow **[Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/
 ```
 <type>(<scope>): <short summary>
 
-Optional body: explain *why*, reference issues/ADRs, note follow-ups.
+Optional body: explain *why*, reference issues, note follow-ups.
 Use a blank line between subject and body.
 
 Optional footer: BREAKING CHANGE: … or Fixes #123
@@ -33,10 +33,6 @@ fix(webhooks): reject replayed payloads outside window
 
 chore(ci): pin action digests for zizmor
 ```
-
-Reference ADRs in the body when a change implements a recorded decision, e.g. _Implement semantic firewall behaviour (ADR-010)._
-
-Roadmap **phases** (`documentation/build-plan.md`) can appear in the **scope** or **body** (e.g. “Phase 1 advisory slice”) instead of ad-hoc bracket prefixes in the subject.
 
 ### Why not ad-hoc tags?
 

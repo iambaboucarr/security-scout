@@ -40,6 +40,7 @@ async def test_finding_round_trip(db_session) -> None:
         status=FindingStatus.unconfirmed,
         triage_confidence=0.82,
         title="Test advisory",
+        cve_id="CVE-2024-9999",
     )
     db_session.add(finding)
     await db_session.commit()
@@ -48,6 +49,7 @@ async def test_finding_round_trip(db_session) -> None:
     assert row is not None
     assert row.severity == Severity.high
     assert row.triage_confidence == pytest.approx(0.82)
+    assert row.cve_id == "CVE-2024-9999"
 
 
 async def test_workflow_run_links_optional_finding(db_session) -> None:

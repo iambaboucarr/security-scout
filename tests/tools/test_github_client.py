@@ -11,6 +11,7 @@ from tools.github import (
     GitHubAPIError,
     GitHubClient,
     GitHubInvalidRepoSlugError,
+    GitHubIssueSearchItem,
     GitHubMalformedResponseError,
     PullRequestInfo,
     RepositoryMetadata,
@@ -209,6 +210,43 @@ async def test_fetch_pull_request_files_stops_at_max_pages(
         gh = GitHubClient("token", client=client)
         with pytest.raises(GitHubMalformedResponseError, match="exceeded"):
             await gh.fetch_pull_request_files("acme", "app", 7)
+
+
+@pytest.mark.asyncio
+async def test_search_issues_success() -> None:
+    payload = {
+        "total_count": 1,
+        "items": [
+            {
+                "number": 7,
+                "title": "Security: CVE-2024-1",
+                "html_url": "https://github.com/acme/app/issues/7",
+                "state": "open",
+                "updated_at": "2024-06-01T12:00:00Z",
+                "body": "text",
+            }
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url.path) == "/search/issues"
+        assert request.url.params.get("q") == "repo:acme/app is:open"
+        return httpx.Response(200, json=payload)
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        items = await gh.search_issues("repo:acme/app is:open")
+
+    assert items == (
+        GitHubIssueSearchItem(
+            number=7,
+            title="Security: CVE-2024-1",
+            html_url="https://github.com/acme/app/issues/7",
+            state="open",
+            updated_at=datetime(2024, 6, 1, 12, 0, tzinfo=UTC),
+            body="text",
+        ),
+    )
 
 
 @pytest.mark.asyncio

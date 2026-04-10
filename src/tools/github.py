@@ -1,7 +1,7 @@
 """GitHub REST read API: advisories, PR metadata, repo metadata.
 
 Uses ``httpx`` (async I/O). PyGitHub is synchronous-only and unused here. Writes must
-respect ``RepoConfig.mode`` (ADR-015); reads are allowed in all modes.
+respect ``RepoConfig.mode``; reads are allowed in all modes.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ __all__ = [
     "GitHubAPIError",
     "GitHubClient",
     "GitHubInvalidRepoSlugError",
+    "GitHubIssueSearchItem",
     "GitHubMalformedResponseError",
     "PullRequestFileInfo",
     "PullRequestInfo",
@@ -244,6 +245,17 @@ class PullRequestFileInfo(BaseModel):
     additions: int = 0
     deletions: int = 0
     sha: str | None = None
+
+
+class GitHubIssueSearchItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    number: int
+    title: str
+    html_url: str
+    state: str
+    updated_at: datetime | None = None
+    body: str | None = None
 
 
 class RepositoryMetadata(BaseModel):
@@ -549,6 +561,58 @@ class GitHubClient:
             page += 1
         return tuple(collected)
 
+    async def search_issues(
+        self,
+        query: str,
+        *,
+        per_page: int = 30,
+        page: int = 1,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | str | None = None,
+    ) -> tuple[GitHubIssueSearchItem, ...]:
+        if per_page < 1 or per_page > 100:
+            msg = "per_page must be between 1 and 100"
+            raise ValueError(msg)
+        if page < 1:
+            msg = "page must be >= 1"
+            raise ValueError(msg)
+        response = await self._request(
+            "GET",
+            "/search/issues",
+            params={"q": query, "per_page": per_page, "page": page},
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        )
+        payload = _as_json_object(
+            response,
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        )
+        items = payload.get("items")
+        if not isinstance(items, list):
+            msg = "GitHub search/issues payload missing items array"
+            raise GitHubMalformedResponseError(
+                msg,
+                finding_id=finding_id,
+                workflow_run_id=workflow_run_id,
+            )
+        out: list[GitHubIssueSearchItem] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                out.append(_issue_search_item_from_payload(raw))
+            except GitHubMalformedResponseError:
+                raise
+            except (TypeError, ValueError) as exc:
+                msg = "GitHub search issue item failed validation"
+                raise GitHubMalformedResponseError(
+                    msg,
+                    finding_id=finding_id,
+                    workflow_run_id=workflow_run_id,
+                ) from exc
+        return tuple(out)
+
     async def fetch_repository_metadata(
         self,
         owner: str,
@@ -638,6 +702,32 @@ def _coerce_positive_int(value: object) -> int | None:
         if iv >= 1:
             return iv
     return None
+
+
+def _issue_search_item_from_payload(data: dict[str, Any]) -> GitHubIssueSearchItem:
+    num = _coerce_positive_int(data.get("number"))
+    if num is None:
+        msg = "search issue payload missing number"
+        raise GitHubMalformedResponseError(msg)
+    title = data.get("title")
+    if not isinstance(title, str):
+        title = ""
+    html_url = data.get("html_url")
+    if not isinstance(html_url, str):
+        html_url = ""
+    state = data.get("state")
+    if not isinstance(state, str):
+        state = ""
+    body = data.get("body")
+    body_s = body if isinstance(body, str) else None
+    return GitHubIssueSearchItem(
+        number=num,
+        title=title,
+        html_url=html_url,
+        state=state,
+        updated_at=_parse_github_datetime(data.get("updated_at")),
+        body=body_s,
+    )
 
 
 def _pull_request_from_payload(

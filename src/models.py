@@ -82,6 +82,7 @@ class Finding(Base):
     )
     cvss_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     cvss_vector: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    cve_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     cwe_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     title: Mapped[str] = mapped_column(String(1024), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
