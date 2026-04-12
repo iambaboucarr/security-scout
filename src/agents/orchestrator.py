@@ -5,22 +5,20 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import httpx
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.triage import run_advisory_triage
+from ai.provider import LLMProvider
 from config import RepoConfig
 from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
 from tools.github import GitHubAPIError, GitHubClient
 from tools.slack import SlackAPIError, SlackClient, SlackMalformedResponseError, finding_to_report_payload
-
-if TYPE_CHECKING:
-    import anthropic
 
 _LOG = structlog.get_logger(__name__)
 
@@ -117,7 +115,7 @@ async def run_advisory_workflow(
     ghsa_id: str,
     advisory_source: Literal["repository", "global"] = "repository",
     run_id: uuid.UUID | None = None,
-    anthropic_client: anthropic.AsyncAnthropic | None = None,
+    llm: LLMProvider | None = None,
     reasoning_model: str = "claude-sonnet-4-6",
     circuit_breaker: ExternalApiCircuitBreaker | None = None,
     schedule_retry: Callable[[ScheduleRetryParams], Awaitable[None]] | None = None,
@@ -239,7 +237,7 @@ async def run_advisory_workflow(
                 advisory_source=advisory_source,
                 run_id=run_id,
                 workflow_run_id=run_stable_id,
-                anthropic_client=anthropic_client,
+                llm=llm,
                 reasoning_model=reasoning_model,
             )
         except GitHubAPIError as e:

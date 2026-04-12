@@ -4,12 +4,13 @@ import os
 import uuid
 from typing import Any, ClassVar, Literal
 
-import anthropic
 import httpx
 import structlog
 from arq.connections import RedisSettings
 
 from agents.orchestrator import ScheduleRetryParams, run_advisory_workflow
+from ai.anthropic_provider import create_provider
+from ai.provider import LLMProvider
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, session_scope
 from tools.github import GitHubClient
@@ -27,16 +28,16 @@ async def startup(ctx: dict[str, Any]) -> None:
     ctx["engine"] = create_engine(settings.database_url)
     ctx["session_factory"] = create_session_factory(ctx["engine"])
     ctx["http_client"] = httpx.AsyncClient(timeout=30.0)
-    ctx["anthropic_client"] = None
+    ctx["llm"] = None
     if settings.anthropic_api_key:
-        ctx["anthropic_client"] = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        ctx["llm"] = create_provider(settings.anthropic_api_key)
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
     await ctx["http_client"].aclose()
-    ac = ctx.get("anthropic_client")
-    if ac is not None:
-        await ac.close()
+    llm = ctx.get("llm")
+    if llm is not None:
+        await llm.close()
     await ctx["engine"].dispose()
 
 
@@ -52,7 +53,7 @@ async def process_advisory_workflow_job(
     app_config = ctx["app_config"]
     session_factory = ctx["session_factory"]
     http: httpx.AsyncClient = ctx["http_client"]
-    anthropic_client: anthropic.AsyncAnthropic | None = ctx.get("anthropic_client")
+    llm: LLMProvider | None = ctx.get("llm")
 
     repo = next((r for r in app_config.repos.repos if r.name == repo_name), None)
     if repo is None:
@@ -93,7 +94,7 @@ async def process_advisory_workflow_job(
             ghsa_id=ghsa_id,
             advisory_source=src,
             run_id=uuid.uuid4(),
-            anthropic_client=anthropic_client,
+            llm=llm,
             reasoning_model=settings.reasoning_model,
             schedule_retry=schedule_retry,
             resume_workflow_run_id=resume_uuid,

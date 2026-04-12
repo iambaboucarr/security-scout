@@ -146,7 +146,7 @@ async def test_run_advisory_triage_persists_finding(db_session) -> None:
                 osv_http,
                 ghsa_id="GHSA-ABCD-EFGH-IJKL",
                 advisory_source="repository",
-                anthropic_client=None,
+                llm=None,
             )
 
     assert row.id is not None
@@ -180,14 +180,15 @@ async def test_run_advisory_triage_llm_refinement_uses_sanitised_prompt(db_sessi
     def osv_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"vulns": []})
 
-    response_msg = MagicMock()
-    response_msg.content = [
-        MagicMock(type="text", text='{"ssvc_action": "attend", "confidence": 0.71, "rationale": "x"}'),
-    ]
-    mock_messages = MagicMock()
-    mock_messages.create = AsyncMock(return_value=response_msg)
-    mock_client = MagicMock()
-    mock_client.messages = mock_messages
+    from ai.provider import CompletionResult, TokenUsage
+
+    llm_response = CompletionResult(
+        text='{"ssvc_action": "attend", "confidence": 0.71, "rationale": "x"}',
+        usage=TokenUsage(input_tokens=100, output_tokens=50),
+    )
+    mock_llm = AsyncMock()
+    mock_llm.complete = AsyncMock(return_value=llm_response)
+    mock_llm.capabilities = MagicMock(return_value=frozenset())
 
     async with _transport(httpx.MockTransport(gh_handler)) as gh_http:
         gh = GitHubClient("token", client=gh_http)
@@ -198,11 +199,11 @@ async def test_run_advisory_triage_llm_refinement_uses_sanitised_prompt(db_sessi
                 gh,
                 osv_http,
                 ghsa_id="GHSA-ABCD-EFGH-IJKL",
-                anthropic_client=mock_client,
+                llm=mock_llm,
                 reasoning_model="claude-sonnet-4-6",
             )
 
-    call_kw = mock_messages.create.call_args.kwargs
+    call_kw = mock_llm.complete.call_args.kwargs
     user_blocks = call_kw["messages"][0]["content"]
     assert "external_content" in user_blocks
     assert "advisory_text" in user_blocks

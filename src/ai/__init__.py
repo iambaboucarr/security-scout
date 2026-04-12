@@ -1,1 +1,1 @@
-"""Prompt and LLM helper modules."""
+"""LLM provider abstraction layer"""
