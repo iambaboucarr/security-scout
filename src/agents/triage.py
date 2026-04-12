@@ -9,13 +9,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-import anthropic
 import httpx
 import structlog
 from cvss import CVSS3
 from cvss.exceptions import CVSS3MalformedError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ai.provider import LLMProvider
 from config import RepoConfig
 from models import Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
 from tools.github import AdvisoryData, GitHubAPIError, GitHubClient, GitHubMalformedResponseError, normalise_ghsa_id
@@ -280,7 +280,7 @@ def _should_refine_with_llm(
 
 
 async def _refine_ssvc_with_llm(
-    client: anthropic.AsyncAnthropic,
+    llm: LLMProvider,
     model: str,
     advisory: AdvisoryData,
     *,
@@ -288,16 +288,13 @@ async def _refine_ssvc_with_llm(
 ) -> tuple[SSVCAction | None, float | None]:
     body = f"{advisory.summary}\n\n{advisory.description}"
     framed = prepare_for_llm(ExternalContentKind.ADVISORY, body, max_chars=48_000)
-    msg = await client.messages.create(
+    result = await llm.complete(
+        messages=[{"role": "user", "content": framed}],
         model=model,
         max_tokens=512,
         system=_LLM_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": framed}],
     )
-    text = ""
-    for block in msg.content:
-        if getattr(block, "type", None) == "text" and hasattr(block, "text"):
-            text += block.text
+    text = result.text
     m = re.search(r"\{[\s\S]*\}\s*$", text.strip())
     if not m:
         return None, None
@@ -374,7 +371,7 @@ async def run_advisory_triage(
     advisory_source: Literal["repository", "global"] = "repository",
     run_id: uuid.UUID | None = None,
     workflow_run_id: uuid.UUID | None = None,
-    anthropic_client: anthropic.AsyncAnthropic | None = None,
+    llm: LLMProvider | None = None,
     reasoning_model: str = "claude-sonnet-4-6",
 ) -> Finding:
     log = _LOG.bind(agent="triage", run_id=str(run_id) if run_id else None)
@@ -410,9 +407,9 @@ async def run_advisory_triage(
 
     llm_action: SSVCAction | None = None
     llm_conf: float | None = None
-    if anthropic_client is not None and _should_refine_with_llm(conf, advisory, cvss_vector):
+    if llm is not None and _should_refine_with_llm(conf, advisory, cvss_vector):
         llm_action, llm_conf = await _refine_ssvc_with_llm(
-            anthropic_client,
+            llm,
             reasoning_model,
             advisory,
             run_id=run_id,

@@ -49,6 +49,15 @@ def test_assert_delivery_fresh_http_date_rejects_stale() -> None:
     assert ei.value.status_code == 401
 
 
+def test_assert_delivery_fresh_http_date_rejects_malformed() -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as ei:
+        assert_delivery_fresh_http_date("not-a-date!!!", now=datetime.now(UTC))
+    assert ei.value.status_code == 401
+    assert "invalid" in ei.value.detail.lower()
+
+
 def test_assert_delivery_fresh_http_date_allows_no_date() -> None:
     assert_delivery_fresh_http_date(None, now=datetime.now(UTC))
 

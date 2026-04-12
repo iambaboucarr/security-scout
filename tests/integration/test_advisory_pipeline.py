@@ -157,7 +157,7 @@ async def test_webhook_enqueues_worker_writes_db_and_slack_mocked(
                 "engine": st.engine,
                 "session_factory": st.session_factory,
                 "http_client": worker_http,
-                "anthropic_client": None,
+                "llm": None,
                 "redis": _FakeRedis(),
             }
             r = client.post(

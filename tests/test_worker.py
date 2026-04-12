@@ -39,7 +39,7 @@ async def test_startup_shutdown_roundtrip(tmp_path: Path, monkeypatch: pytest.Mo
     await startup(ctx)
     assert "settings" in ctx
     assert "session_factory" in ctx
-    assert ctx["anthropic_client"] is None
+    assert ctx["llm"] is None
     assert isinstance(ctx["http_client"], httpx.AsyncClient)
 
     await shutdown(ctx)
@@ -104,7 +104,7 @@ async def test_process_advisory_workflow_job_invalid_source_returns(
 
 
 @pytest.mark.asyncio
-async def test_startup_sets_anthropic_when_api_key_present(
+async def test_startup_sets_llm_provider_when_api_key_present(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -129,6 +129,6 @@ async def test_startup_sets_anthropic_when_api_key_present(
     ctx: dict[str, Any] = {}
     await startup(ctx)
     try:
-        assert ctx["anthropic_client"] is not None
+        assert ctx["llm"] is not None
     finally:
         await shutdown(ctx)
