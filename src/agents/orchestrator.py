@@ -40,6 +40,7 @@ from config import RepoConfig
 from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
+from tools.rate_limiter import RateLimiterCircuitOpen, RateLimitExceeded, SlidingWindowRateLimiter
 from tools.scm.protocol import SCMProvider
 from tools.slack import (
     ApprovalButtonContext,
@@ -52,6 +53,8 @@ from tools.slack import (
 _LOG = structlog.get_logger(__name__)
 
 _MAX_LOG_OUTPUT = 500
+
+_RATE_LIMIT_RETRY_SECONDS = 120
 
 
 class AdvisoryWorkflowState(StrEnum):
@@ -150,6 +153,7 @@ async def run_advisory_workflow(
     circuit_breaker: ExternalApiCircuitBreaker | None = None,
     schedule_retry: Callable[[ScheduleRetryParams], Awaitable[None]] | None = None,
     resume_workflow_run_id: uuid.UUID | None = None,
+    rate_limiter: SlidingWindowRateLimiter | None = None,
 ) -> WorkflowRun:
     """Run or resume the advisory triage → Slack report workflow.
 
@@ -496,6 +500,92 @@ async def run_advisory_workflow(
             run_stable_id,
             missing_message="workflow run missing after Slack circuit deferral",
         )
+
+    if rate_limiter is not None and run.state == AdvisoryWorkflowState.triage_complete.value:
+        try:
+            slack_limit = repo.rate_limits.slack_findings_per_hour if repo.rate_limits else 30
+            await rate_limiter.check_and_increment(
+                operation="slack_finding",
+                scope=repo.slack_channel,
+                limit=slack_limit,
+                window_seconds=3600,
+                circuit_scope=repo.name,
+            )
+        except RateLimiterCircuitOpen as e:
+            await _append_action_log(
+                session,
+                workflow_run_id=run_stable_id,
+                agent="orchestrator",
+                tool_name="rate_limiter",
+                tool_inputs={"operation": "slack_finding", "scope": repo.slack_channel},
+                tool_output=f"circuit open; {e.remaining_seconds}s remaining",
+            )
+            await session.commit()
+            if schedule_retry is None:
+                msg = "schedule_retry required when rate limiter circuit is open"
+                raise RuntimeError(msg) from None
+            await schedule_retry(
+                ScheduleRetryParams(
+                    workflow_run_id=run_stable_id,
+                    delay_seconds=e.remaining_seconds,
+                    state=run.state,
+                    reason="rate_limiter_circuit_open",
+                ),
+            )
+            return await _require_run(
+                session,
+                run_stable_id,
+                missing_message="workflow run missing after rate limiter circuit deferral",
+            )
+        except RateLimitExceeded as e:
+            await _append_action_log(
+                session,
+                workflow_run_id=run_stable_id,
+                agent="orchestrator",
+                tool_name="rate_limiter",
+                tool_inputs={
+                    "operation": e.operation,
+                    "scope": e.scope,
+                    "limit": e.limit,
+                },
+                tool_output=(f"rate limit exceeded; should_alert={e.should_alert}, circuit_opened={e.circuit_opened}"),
+            )
+            await session.commit()
+            if e.should_alert:
+                await _best_effort_error_slack(
+                    slack,
+                    repo.slack_channel,
+                    title=f"Rate limit reached: {e.operation}",
+                    detail=f"Limit {e.limit}/hour for {e.scope}",
+                    workflow_run_id=run_stable_id,
+                    finding_id=str(finding.id),
+                )
+            if schedule_retry is not None:
+                await schedule_retry(
+                    ScheduleRetryParams(
+                        workflow_run_id=run_stable_id,
+                        delay_seconds=_RATE_LIMIT_RETRY_SECONDS,
+                        state=run.state,
+                        reason="slack_rate_limited",
+                    ),
+                )
+                return await _require_run(
+                    session,
+                    run_stable_id,
+                    missing_message="workflow run missing after rate limit deferral",
+                )
+            run.state = AdvisoryWorkflowState.error_reporting.value
+            run.error_message = _truncate_log(str(e), 4000)
+            run.completed_at = _now_utc()
+            await session.commit()
+            log.warning(
+                "workflow_error",
+                metric_name="workflow_error_total",
+                phase="reporting",
+                workflow_run_id=str(run_stable_id),
+                err=str(e),
+            )
+            return run
 
     if run.state == AdvisoryWorkflowState.triage_complete.value:
         run.state = AdvisoryWorkflowState.reporting.value

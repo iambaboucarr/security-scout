@@ -13,6 +13,7 @@ from ai.anthropic_provider import create_provider
 from ai.provider import LLMProvider
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, session_scope
+from tools.rate_limiter import SlidingWindowRateLimiter
 from tools.scm.github import GitHubSCMProvider
 from tools.slack import SlackClient
 
@@ -31,6 +32,8 @@ async def startup(ctx: dict[str, Any]) -> None:
     ctx["llm"] = None
     if settings.anthropic_api_key:
         ctx["llm"] = create_provider(settings.anthropic_api_key)
+    redis = ctx.get("redis")
+    ctx["rate_limiter"] = SlidingWindowRateLimiter(redis) if redis is not None else None
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -54,6 +57,7 @@ async def process_advisory_workflow_job(
     session_factory = ctx["session_factory"]
     http: httpx.AsyncClient = ctx["http_client"]
     llm: LLMProvider | None = ctx.get("llm")
+    rate_limiter: SlidingWindowRateLimiter | None = ctx.get("rate_limiter")
 
     repo = next((r for r in app_config.repos.repos if r.name == repo_name), None)
     if repo is None:
@@ -98,6 +102,7 @@ async def process_advisory_workflow_job(
             reasoning_model=settings.reasoning_model,
             schedule_retry=schedule_retry,
             resume_workflow_run_id=resume_uuid,
+            rate_limiter=rate_limiter,
         )
 
 
