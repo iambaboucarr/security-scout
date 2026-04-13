@@ -14,13 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import GitHubIssuesTrackerConfig
 from models import Finding, FindingStatus, WorkflowKind
-from tools.github import (
-    GitHubClient,
-    GitHubIssueSearchItem,
-    normalise_ghsa_id,
-    validate_github_repo_name,
-    validate_github_repo_owner,
-)
+from tools.github import validate_github_repo_name, validate_github_repo_owner
+from tools.scm import IssueSearchItem, SCMProvider, normalise_ghsa_id
 
 _LOG = structlog.get_logger(__name__)
 
@@ -93,7 +88,7 @@ def _scout_finding_status_label(status: FindingStatus) -> str:
 
 
 def _issue_text_contains_identifier(
-    item: GitHubIssueSearchItem,
+    item: IssueSearchItem,
     *,
     cve: str | None,
     ghsa: str | None,
@@ -149,7 +144,7 @@ def _github_should_skip_duplicate_url(url: str, seen_urls: set[str]) -> bool:
 def _github_issue_to_match(
     owner: str,
     repo: str,
-    item: GitHubIssueSearchItem,
+    item: IssueSearchItem,
     *,
     match_field: str,
     matched_value: str,
@@ -168,7 +163,7 @@ def _github_issue_to_match(
 
 
 async def _github_append_tier1_matches(
-    client: GitHubClient,
+    scm: SCMProvider,
     build_query: Callable[[str], str],
     owner: str,
     repo: str,
@@ -182,7 +177,7 @@ async def _github_append_tier1_matches(
     id_ghsa: str | None,
 ) -> None:
     q = build_query(search_token)
-    items = await client.search_issues(q, per_page=30, page=1)
+    items = await scm.search_issues(q, per_page=30, page=1)
     for it in items:
         if not _issue_text_contains_identifier(it, cve=id_cve, ghsa=id_ghsa):
             continue
@@ -281,12 +276,12 @@ async def _scout_append_cwe_matches(
 class GitHubIssuesAdapter:
     def __init__(
         self,
-        client: GitHubClient,
+        scm: SCMProvider,
         owner: str,
         repo: str,
         tracker_cfg: GitHubIssuesTrackerConfig,
     ) -> None:
-        self._client = client
+        self._scm = scm
         self._owner = validate_github_repo_owner(owner)
         self._repo = validate_github_repo_name(repo)
         self._cfg = tracker_cfg
@@ -318,7 +313,7 @@ class GitHubIssuesAdapter:
         ghsa = _try_normalise_ghsa(ghsa_id)
         if cve is not None:
             await _github_append_tier1_matches(
-                self._client,
+                self._scm,
                 self._build_query,
                 self._owner,
                 self._repo,
@@ -332,7 +327,7 @@ class GitHubIssuesAdapter:
             )
         if ghsa is not None:
             await _github_append_tier1_matches(
-                self._client,
+                self._scm,
                 self._build_query,
                 self._owner,
                 self._repo,

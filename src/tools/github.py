@@ -16,6 +16,16 @@ import structlog
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from exceptions import SecurityScoutError
+from tools.scm.models import (
+    AdvisoryData,
+    IssueSearchItem,
+    PullRequestFileInfo,
+    PullRequestInfo,
+    RepositoryMetadata,
+    normalise_ghsa_id,
+)
+
+GitHubIssueSearchItem = IssueSearchItem
 
 __all__ = [
     "AdvisoryData",
@@ -24,6 +34,7 @@ __all__ = [
     "GitHubInvalidRepoSlugError",
     "GitHubIssueSearchItem",
     "GitHubMalformedResponseError",
+    "IssueSearchItem",
     "PullRequestFileInfo",
     "PullRequestInfo",
     "RepositoryMetadata",
@@ -32,8 +43,6 @@ __all__ = [
     "validate_github_repo_owner",
 ]
 
-
-_GHSA_ID_PATTERN = re.compile(r"^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$", re.IGNORECASE)
 # GitHub login / org: alphanumeric and single internal hyphens; max 39 (docs).
 _REPO_OWNER_PATTERN = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$")
 # Repository name: letters, digits, ., -, _ ; max 100.
@@ -171,16 +180,6 @@ def _message_from_error_body(response: httpx.Response) -> str:
     return response.text.strip()
 
 
-def normalise_ghsa_id(raw: str) -> str:
-    """Return canonical ``GHSA-xxxx-xxxx-xxxx`` (raises if shape is invalid)."""
-    s = raw.strip()
-    if not _GHSA_ID_PATTERN.match(s):
-        msg = f"invalid GHSA id: {raw!r}"
-        raise ValueError(msg)
-    parts = s.split("-")
-    return f"GHSA-{'-'.join(p.upper() for p in parts[1:])}"
-
-
 def validate_github_repo_owner(owner: str) -> str:
     """Return stripped owner/org slug; raises ``GitHubInvalidRepoSlugError`` if invalid."""
     s = owner.strip()
@@ -204,77 +203,6 @@ def _require_pull_number(pull_number: int) -> int:
         msg = f"pull_number must be >= 1, got {pull_number}"
         raise ValueError(msg)
     return pull_number
-
-
-class AdvisoryData(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    ghsa_id: str
-    source: Literal["repository", "global"]
-    summary: str
-    description: str
-    severity: str | None = None
-    cve_ids: tuple[str, ...] = ()
-    cwe_ids: tuple[str, ...] = ()
-    html_url: str | None = None
-    published_at: datetime | None = None
-    updated_at: datetime | None = None
-    cvss_vector: str | None = None
-    cvss_score_api: float | None = None
-    affected_package_name: str | None = None
-    affected_package_ecosystem: str | None = None
-
-
-class PullRequestInfo(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    number: int
-    title: str
-    state: str
-    head_sha: str
-    base_sha: str
-    user_login: str | None = None
-    html_url: str
-    additions: int = 0
-    deletions: int = 0
-    changed_files: int = 0
-
-
-class PullRequestFileInfo(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    filename: str
-    status: str
-    patch: str | None = None
-    additions: int = 0
-    deletions: int = 0
-    sha: str | None = None
-
-
-class GitHubIssueSearchItem(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    number: int
-    title: str
-    html_url: str
-    state: str
-    updated_at: datetime | None = None
-    body: str | None = None
-
-
-class RepositoryMetadata(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    full_name: str
-    description: str | None = None
-    default_branch: str
-    private: bool
-    html_url: str
-    stargazers_count: int = 0
-    forks_count: int = 0
-    open_issues_count: int = 0
-    language: str | None = None
-    pushed_at: datetime | None = None
 
 
 class _GitHubClientConfig(BaseModel):

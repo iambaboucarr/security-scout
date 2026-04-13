@@ -10,7 +10,12 @@ from agents.orchestrator import AdvisoryWorkflowState, ScheduleRetryParams, run_
 from config import RepoConfig
 from models import Finding, FindingStatus, Severity, SSVCAction, WorkflowKind, WorkflowRun
 from tools.github import GitHubAPIError, GitHubClient
+from tools.scm.github import GitHubSCMProvider
 from tools.slack import SlackClient
+
+
+def _make_scm(gh: object) -> GitHubSCMProvider:
+    return GitHubSCMProvider.from_client(gh)  # type: ignore[arg-type]
 
 
 def _repo() -> RepoConfig:
@@ -75,10 +80,11 @@ async def test_resume_reporting_skips_triage(db_session, mocker) -> None:
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         out = await run_advisory_workflow(
             db_session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -102,10 +108,11 @@ async def test_resume_triaging_github_transient_no_second_workflow_run(db_sessio
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         out = await run_advisory_workflow(
             db_session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -125,10 +132,11 @@ async def test_resume_triaging_github_transient_no_second_workflow_run(db_sessio
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         out2 = await run_advisory_workflow(
             db_session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",

@@ -1,8 +1,10 @@
 """Advisory triage: CVSS, SSVC, dedup, optional LLM refinement.
 
-Tool access (least-privilege):
+Tool access (least-privilege, ADR-027):
     ALLOWED:
-        - scm.fetch_advisory          (via GitHubClient.fetch_*_security_advisory)
+        - scm.fetch_advisory          (via SCMProvider)
+        - scm.fetch_repository_metadata (via SCMProvider, dependency health)
+        - scm.fetch_repository_contributors_count (via SCMProvider, dependency health)
         - input_sanitiser.sanitise    (via sanitize_text / prepare_for_llm)
 
     NOT ALLOWED:
@@ -35,8 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai.provider import LLMProvider
 from config import RepoConfig
+from exceptions import SecurityScoutError
 from models import Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
-from tools.github import AdvisoryData, GitHubAPIError, GitHubClient, GitHubMalformedResponseError, normalise_ghsa_id
 from tools.input_sanitiser import ExternalContentKind, prepare_for_llm, sanitize_text
 from tools.issue_tracker import (
     GitHubIssuesAdapter,
@@ -50,6 +52,7 @@ from tools.osv import (
     github_ecosystem_to_osv,
     query_osv_vulnerability_ids,
 )
+from tools.scm import AdvisoryData, SCMProvider, normalise_ghsa_id
 
 _LOG = structlog.get_logger(__name__)
 
@@ -221,7 +224,7 @@ def apply_dependency_health_to_confidence(
 
 
 async def collect_dependency_health_signals(
-    gh: GitHubClient,
+    scm: SCMProvider,
     http: httpx.AsyncClient,
     advisory: AdvisoryData,
     exclude_ids: set[str],
@@ -235,13 +238,14 @@ async def collect_dependency_health_signals(
     pushed_at: datetime | None = None
     days_since: int | None = None
     if owner and repo:
+        repo_slug = f"{owner}/{repo}"
         try:
-            meta = await gh.fetch_repository_metadata(owner, repo)
+            meta = await scm.fetch_repository_metadata(repo_slug)
             pushed_at = meta.pushed_at
             if pushed_at is not None:
                 p = pushed_at.astimezone(UTC)
                 days_since = max(0, (datetime.now(UTC) - p).days)
-        except GitHubAPIError, GitHubMalformedResponseError, OSError, httpx.HTTPError:
+        except SecurityScoutError, OSError, httpx.HTTPError:
             _LOG.warning(
                 "dependency_health_metadata_failed",
                 owner=owner,
@@ -249,9 +253,9 @@ async def collect_dependency_health_signals(
                 ghsa_id=advisory.ghsa_id,
             )
         try:
-            n, truncated = await gh.fetch_repository_contributors_count_upper_bound(owner, repo)
+            n, truncated = await scm.fetch_repository_contributors_count(repo_slug)
             contributors = n
-        except GitHubAPIError, GitHubMalformedResponseError, OSError, httpx.HTTPError, ValueError:
+        except SecurityScoutError, OSError, httpx.HTTPError, ValueError:
             _LOG.warning(
                 "dependency_health_contributors_failed",
                 owner=owner,
@@ -346,7 +350,7 @@ async def _refine_ssvc_with_llm(
 
 def _build_issue_tracker_adapters(
     repo: RepoConfig,
-    gh: GitHubClient,
+    scm: SCMProvider,
     session: AsyncSession,
 ) -> list[IssueTrackerAdapter]:
     adapters: list[IssueTrackerAdapter] = []
@@ -354,7 +358,7 @@ def _build_issue_tracker_adapters(
         if entry.type == "github_issues":
             adapters.append(
                 GitHubIssuesAdapter(
-                    gh,
+                    scm,
                     repo.github_org,
                     repo.github_repo,
                     entry,
@@ -382,31 +386,24 @@ def _first_cwe_id(advisory: AdvisoryData) -> str | None:
 async def run_advisory_triage(
     session: AsyncSession,
     repo: RepoConfig,
-    gh: GitHubClient,
+    scm: SCMProvider,
     http: httpx.AsyncClient,
     *,
     ghsa_id: str,
     advisory_source: Literal["repository", "global"] = "repository",
     run_id: uuid.UUID | None = None,
-    workflow_run_id: uuid.UUID | None = None,
+    workflow_run_id: uuid.UUID | None = None,  # noqa: ARG001 — reserved for audit logging
     llm: LLMProvider | None = None,
     reasoning_model: str = "claude-sonnet-4-6",
 ) -> Finding:
     log = _LOG.bind(agent="triage", run_id=str(run_id) if run_id else None)
     ghsa = normalise_ghsa_id(ghsa_id)
-    kw: dict[str, Any] = {}
-    if workflow_run_id is not None:
-        kw["workflow_run_id"] = workflow_run_id
-    if advisory_source == "repository":
-        advisory = await gh.fetch_repository_security_advisory(
-            repo.github_org,
-            repo.github_repo,
-            ghsa,
-            finding_id=ghsa,
-            **kw,
-        )
-    else:
-        advisory = await gh.fetch_global_security_advisory(ghsa, finding_id=ghsa, **kw)
+    repo_slug = f"{repo.github_org}/{repo.github_repo}"
+    advisory = await scm.fetch_advisory(
+        ghsa,
+        repo=repo_slug if advisory_source == "repository" else None,
+        source=advisory_source,
+    )
 
     cvss_base, cvss_vector = derive_cvss_base_and_vector(advisory)
     exploitation = infer_exploitation_stage(advisory)
@@ -420,7 +417,7 @@ async def run_advisory_triage(
         exclude_osv.add(cve_id.upper())
     exclude_osv.update(x.upper() for x in advisory.cve_ids)
 
-    health = await collect_dependency_health_signals(gh, http, advisory, exclude_osv)
+    health = await collect_dependency_health_signals(scm, http, advisory, exclude_osv)
     conf = apply_dependency_health_to_confidence(conf, health)
 
     llm_action: SSVCAction | None = None
@@ -437,7 +434,7 @@ async def run_advisory_triage(
         conf = llm_conf
 
     cwe_for_dedup = _first_cwe_id(advisory)
-    adapters = _build_issue_tracker_adapters(repo, gh, session)
+    adapters = _build_issue_tracker_adapters(repo, scm, session)
     dedup_matches = await run_dedup_checks(
         cve_id=cve_id,
         ghsa_id=ghsa,

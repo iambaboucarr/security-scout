@@ -11,7 +11,12 @@ from config import RepoConfig
 from models import AgentActionLog, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
 from tools.circuit_breaker import ExternalApiCircuitBreaker
 from tools.github import GitHubAPIError, GitHubClient
+from tools.scm.github import GitHubSCMProvider
 from tools.slack import SlackClient
+
+
+def _make_scm(gh: object) -> GitHubSCMProvider:
+    return GitHubSCMProvider.from_client(gh)  # type: ignore[arg-type]
 
 
 def _repo() -> RepoConfig:
@@ -62,10 +67,11 @@ async def test_workflow_happy_path_completes(db_session, mocker) -> None:
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -88,10 +94,11 @@ async def test_github_transient_schedules_retry(db_session, mocker) -> None:
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -104,7 +111,7 @@ async def test_github_transient_schedules_retry(db_session, mocker) -> None:
     args = schedule.await_args[0][0]
     assert isinstance(args, ScheduleRetryParams)
     assert args.delay_seconds == 1
-    assert args.reason == "github_transient"
+    assert args.reason == "triage_transient"
 
 
 @pytest.mark.asyncio
@@ -120,10 +127,11 @@ async def test_github_permanent_error_triage_terminal(db_session, mocker) -> Non
         slack = SlackClient("xoxb-test", client=http)
         slack.notify_workflow_error = notify
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -159,10 +167,11 @@ async def test_circuit_github_blocks_before_triage(db_session, mocker) -> None:
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         await run_advisory_workflow(
             db_session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -208,11 +217,12 @@ async def test_slack_transient_schedules_retry(db_session, mocker) -> None:
     ) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         schedule = AsyncMock()
         run = await run_advisory_workflow(
             db_session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -248,12 +258,13 @@ async def test_advisory_to_slack_seconds_metric_emitted(db_session, mocker) -> N
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         with patch("agents.orchestrator._LOG") as mock_log:
             mock_log.bind.return_value = mock_log
             run = await run_advisory_workflow(
                 db_session,
                 repo,
-                gh,
+                scm,
                 http,
                 slack,
                 ghsa_id="GHSA-TEST-ABCD-EFGH",

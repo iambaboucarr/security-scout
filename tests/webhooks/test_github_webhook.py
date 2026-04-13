@@ -11,10 +11,10 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from webhooks.github import (
-    assert_delivery_fresh_http_date,
-    verify_github_hub_signature_256,
-)
+from webhooks.scm.github import GitHubWebhookProvider
+from webhooks.scm.protocol import WebhookVerificationError
+
+_PROVIDER = GitHubWebhookProvider()
 
 
 def test_verify_github_hub_signature_256_accepts_github_doc_example() -> None:
@@ -23,43 +23,31 @@ def test_verify_github_hub_signature_256_accepts_github_doc_example() -> None:
     payload = b"Hello, World!"
     mac = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256)
     header = "sha256=" + mac.hexdigest()
-    verify_github_hub_signature_256(payload, secret, header)
+    _PROVIDER.verify_signature(payload, {"X-Hub-Signature-256": header}, secret)
 
 
 def test_verify_github_hub_signature_256_rejects_tamper() -> None:
-    from fastapi import HTTPException
-
     secret = "It's a Secret to Everybody"
     payload = b"Hello, World!"
     mac = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256)
     header = "sha256=" + mac.hexdigest()
-    with pytest.raises(HTTPException) as ei:
-        verify_github_hub_signature_256(payload + b"!", secret, header)
-    assert ei.value.status_code == 401
+    with pytest.raises(WebhookVerificationError, match="invalid"):
+        _PROVIDER.verify_signature(payload + b"!", {"X-Hub-Signature-256": header}, secret)
 
 
 def test_assert_delivery_fresh_http_date_rejects_stale() -> None:
-    from email.utils import format_datetime
-
-    from fastapi import HTTPException
-
     old = format_datetime(datetime.now(UTC) - timedelta(seconds=400))
-    with pytest.raises(HTTPException) as ei:
-        assert_delivery_fresh_http_date(old, now=datetime.now(UTC))
-    assert ei.value.status_code == 401
+    with pytest.raises(WebhookVerificationError, match="stale"):
+        _PROVIDER.assert_delivery_fresh({"Date": old}, now=datetime.now(UTC))
 
 
 def test_assert_delivery_fresh_http_date_rejects_malformed() -> None:
-    from fastapi import HTTPException
-
-    with pytest.raises(HTTPException) as ei:
-        assert_delivery_fresh_http_date("not-a-date!!!", now=datetime.now(UTC))
-    assert ei.value.status_code == 401
-    assert "invalid" in ei.value.detail.lower()
+    with pytest.raises(WebhookVerificationError, match="invalid"):
+        _PROVIDER.assert_delivery_fresh({"Date": "not-a-date!!!"}, now=datetime.now(UTC))
 
 
 def test_assert_delivery_fresh_http_date_allows_no_date() -> None:
-    assert_delivery_fresh_http_date(None, now=datetime.now(UTC))
+    _PROVIDER.assert_delivery_fresh({}, now=datetime.now(UTC))
 
 
 def test_github_webhook_ping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

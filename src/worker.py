@@ -13,7 +13,7 @@ from ai.anthropic_provider import create_provider
 from ai.provider import LLMProvider
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, session_scope
-from tools.github import GitHubClient
+from tools.scm.github import GitHubSCMProvider
 from tools.slack import SlackClient
 
 _LOG = structlog.get_logger(__name__)
@@ -81,14 +81,14 @@ async def process_advisory_workflow_job(
         )
 
     async with (
-        GitHubClient(settings.github_pat) as gh,
+        GitHubSCMProvider(settings.github_pat) as scm,
         SlackClient(settings.slack_bot_token) as slack,
         session_scope(session_factory) as session,
     ):
         await run_advisory_workflow(
             session,
             repo,
-            gh,
+            scm,
             http,
             slack,
             ghsa_id=ghsa_id,

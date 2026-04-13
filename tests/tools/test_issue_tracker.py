@@ -16,6 +16,7 @@ from tools.issue_tracker import (
     normalise_cve_id,
     run_dedup_checks,
 )
+from tools.scm.github import GitHubSCMProvider
 
 
 def _transport(handler: httpx.MockTransport) -> httpx.AsyncClient:
@@ -61,7 +62,8 @@ async def test_github_issues_adapter_tier1_cve() -> None:
     cfg = GitHubIssuesTrackerConfig()
     async with _transport(httpx.MockTransport(handler)) as client:
         gh = GitHubClient("token", client=client)
-        adapter = GitHubIssuesAdapter(gh, "acme", "app", cfg)
+        scm = GitHubSCMProvider.from_client(gh)
+        adapter = GitHubIssuesAdapter(scm, "acme", "app", cfg)
         matches = await adapter.search_known_vulnerability(
             "CVE-2024-9999",
             None,
@@ -106,7 +108,8 @@ async def test_github_issues_adapter_skips_issue_without_identifier_in_text() ->
     cfg = GitHubIssuesTrackerConfig()
     async with _transport(httpx.MockTransport(handler)) as client:
         gh = GitHubClient("token", client=client)
-        adapter = GitHubIssuesAdapter(gh, "acme", "app", cfg)
+        scm = GitHubSCMProvider.from_client(gh)
+        adapter = GitHubIssuesAdapter(scm, "acme", "app", cfg)
         matches = await adapter.search_known_vulnerability(
             "CVE-2024-9999",
             None,
@@ -265,7 +268,8 @@ async def test_run_dedup_checks_dedupes_and_logs_metrics(
     cfg = GitHubIssuesTrackerConfig()
     async with _transport(httpx.MockTransport(handler)) as client:
         gh = GitHubClient("token", client=client)
-        gh_adapter = GitHubIssuesAdapter(gh, "acme", "app", cfg)
+        scm = GitHubSCMProvider.from_client(gh)
+        gh_adapter = GitHubIssuesAdapter(scm, "acme", "app", cfg)
         scout = ScoutHistoricalAdapter(db_session)
         out = await run_dedup_checks(
             cve_id="CVE-2024-1000",

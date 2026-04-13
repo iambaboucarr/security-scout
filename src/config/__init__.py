@@ -131,6 +131,8 @@ class Settings(BaseSettings):
 
     repos_config_path: Path = Field(default=_DEFAULT_REPOS_PATH)
 
+    scm_provider: str = "github"
+
     mechanical_model: str = "claude-haiku-4-5"
     reasoning_model: str = "claude-sonnet-4-6"
     high_stakes_model: str = "claude-opus-4-6"

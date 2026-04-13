@@ -23,7 +23,9 @@ from agents.triage import (
 )
 from ai.provider import CompletionResult, TokenUsage
 from models import Severity, SSVCAction
-from tools.github import AdvisoryData, GitHubAPIError, GitHubClient
+from tools.github import GitHubAPIError, GitHubClient
+from tools.scm import AdvisoryData
+from tools.scm.github import GitHubSCMProvider
 
 
 def _advisory(
@@ -500,9 +502,10 @@ async def test_collect_health_non_github_ecosystem() -> None:
         return httpx.Response(200, json={"vulns": [{"id": "CVE-2024-1"}]})
 
     gh = MagicMock(spec=GitHubClient)
+    scm = GitHubSCMProvider.from_client(gh)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(osv_handler)) as http:
-        result = await collect_dependency_health_signals(gh, http, adv, {"GHSA-ABCD-EFGH-IJKL"})
+        result = await collect_dependency_health_signals(scm, http, adv, {"GHSA-ABCD-EFGH-IJKL"})
 
     assert result.osv_ecosystem == "npm"
     assert result.osv_prior_vulnerabilities_excluding_current >= 0
@@ -523,12 +526,13 @@ async def test_collect_health_github_actions_metadata_fails() -> None:
     gh.fetch_repository_contributors_count_upper_bound = AsyncMock(
         side_effect=GitHubAPIError("not found", is_transient=False, http_status=404),
     )
+    scm = GitHubSCMProvider.from_client(gh)
 
     def osv_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(osv_handler)) as http:
-        result = await collect_dependency_health_signals(gh, http, adv, set())
+        result = await collect_dependency_health_signals(scm, http, adv, set())
 
     assert result.github_contributors_upper_bound is None
     assert result.upstream_last_push_at is None
@@ -538,9 +542,10 @@ async def test_collect_health_github_actions_metadata_fails() -> None:
 async def test_collect_health_osv_ecosystem_not_mapped() -> None:
     adv = _advisory(affected_package_ecosystem=None, affected_package_name="somepkg")
     gh = MagicMock(spec=GitHubClient)
+    scm = GitHubSCMProvider.from_client(gh)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))) as http:
-        result = await collect_dependency_health_signals(gh, http, adv, set())
+        result = await collect_dependency_health_signals(scm, http, adv, set())
 
     assert result.osv_query_skipped_reason == "ecosystem_not_mapped"
 
@@ -549,8 +554,9 @@ async def test_collect_health_osv_ecosystem_not_mapped() -> None:
 async def test_collect_health_no_package_name() -> None:
     adv = _advisory(affected_package_ecosystem="npm", affected_package_name=None)
     gh = MagicMock(spec=GitHubClient)
+    scm = GitHubSCMProvider.from_client(gh)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))) as http:
-        result = await collect_dependency_health_signals(gh, http, adv, set())
+        result = await collect_dependency_health_signals(scm, http, adv, set())
 
     assert result.osv_query_skipped_reason == "no_package"

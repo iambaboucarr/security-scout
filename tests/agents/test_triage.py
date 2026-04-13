@@ -19,7 +19,9 @@ from agents.triage import (
 )
 from config import RepoConfig
 from models import Finding, Severity, SSVCAction
-from tools.github import AdvisoryData, GitHubClient
+from tools.github import GitHubClient
+from tools.scm import AdvisoryData
+from tools.scm.github import GitHubSCMProvider
 
 
 def _transport(handler: httpx.MockTransport) -> httpx.AsyncClient:
@@ -136,13 +138,14 @@ async def test_run_advisory_triage_persists_finding(db_session) -> None:
 
     async with _transport(httpx.MockTransport(gh_handler)) as gh_http:
         gh = GitHubClient("token", client=gh_http)
+        scm = GitHubSCMProvider.from_client(gh)
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(osv_handler),
         ) as osv_http:
             row = await run_advisory_triage(
                 db_session,
                 _repo(),
-                gh,
+                scm,
                 osv_http,
                 ghsa_id="GHSA-ABCD-EFGH-IJKL",
                 advisory_source="repository",
@@ -192,11 +195,12 @@ async def test_run_advisory_triage_llm_refinement_uses_sanitised_prompt(db_sessi
 
     async with _transport(httpx.MockTransport(gh_handler)) as gh_http:
         gh = GitHubClient("token", client=gh_http)
+        scm = GitHubSCMProvider.from_client(gh)
         async with httpx.AsyncClient(transport=httpx.MockTransport(osv_handler)) as osv_http:
             await run_advisory_triage(
                 db_session,
                 _repo(),
-                gh,
+                scm,
                 osv_http,
                 ghsa_id="GHSA-ABCD-EFGH-IJKL",
                 llm=mock_llm,

@@ -18,7 +18,12 @@ from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
 from tools.github import GitHubAPIError, GitHubClient
+from tools.scm.github import GitHubSCMProvider
 from tools.slack import SlackAPIError, SlackClient, SlackMalformedResponseError
+
+
+def _make_scm(gh: object) -> GitHubSCMProvider:
+    return GitHubSCMProvider.from_client(gh)  # type: ignore[arg-type]
 
 
 def _repo() -> RepoConfig:
@@ -102,11 +107,12 @@ async def test_resume_completed_workflow_raises(db_session, mocker) -> None:
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         with pytest.raises(RuntimeError, match="cannot resume a completed"):
             await run_advisory_workflow(
                 db_session,
                 _repo(),
-                gh,
+                scm,
                 http,
                 slack,
                 ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -127,11 +133,12 @@ async def test_resume_wrong_workflow_type_raises(db_session) -> None:
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         with pytest.raises(RuntimeError, match="resume only supported for advisory"):
             await run_advisory_workflow(
                 db_session,
                 _repo(),
-                gh,
+                scm,
                 http,
                 slack,
                 ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -152,11 +159,12 @@ async def test_resume_invalid_state_raises(db_session) -> None:
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         with pytest.raises(RuntimeError, match="cannot resume from state"):
             await run_advisory_workflow(
                 db_session,
                 _repo(),
-                gh,
+                scm,
                 http,
                 slack,
                 ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -178,11 +186,12 @@ async def test_resume_triage_complete_with_no_finding_raises(db_session) -> None
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         with pytest.raises(RuntimeError, match="resume run has no finding_id"):
             await run_advisory_workflow(
                 db_session,
                 _repo(),
-                gh,
+                scm,
                 http,
                 slack,
                 ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -204,10 +213,11 @@ async def test_security_scout_error_transient_schedules_retry(db_session, mocker
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -233,10 +243,11 @@ async def test_security_scout_error_permanent_terminal(db_session, mocker) -> No
         slack = SlackClient("xoxb-test", client=http)
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -262,10 +273,11 @@ async def test_unrecoverable_exception_during_triage(db_session, mocker) -> None
         slack = SlackClient("xoxb-test", client=http)
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -303,10 +315,11 @@ async def test_slack_permanent_error_terminal(db_session, mocker) -> None:
         slack = SlackClient("xoxb-test", client=http)
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -334,10 +347,11 @@ async def test_slack_malformed_response_terminal(db_session, mocker) -> None:
         )
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -363,10 +377,11 @@ async def test_unrecoverable_exception_during_reporting(db_session, mocker) -> N
         slack.send_finding = AsyncMock(side_effect=RuntimeError("surprise"))
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -407,10 +422,11 @@ async def test_slack_circuit_blocks_before_reporting(db_session, mocker) -> None
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -444,11 +460,12 @@ async def test_slack_circuit_blocks_no_schedule_retry_raises(db_session) -> None
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         with pytest.raises(RuntimeError, match="schedule_retry is required"):
             await run_advisory_workflow(
                 db_session,
                 _repo(),
-                gh,
+                scm,
                 http,
                 slack,
                 ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -472,11 +489,12 @@ async def test_github_circuit_blocks_no_schedule_retry_raises(db_session, mocker
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         with pytest.raises(RuntimeError, match="schedule_retry is required"):
             await run_advisory_workflow(
                 db_session,
                 _repo(),
-                gh,
+                scm,
                 http,
                 slack,
                 ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -504,10 +522,11 @@ async def test_github_transient_opens_circuit_breaker(db_session, mocker) -> Non
         slack = SlackClient("xoxb-test", client=http)
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -547,10 +566,11 @@ async def test_slack_transient_opens_circuit_breaker(db_session, mocker) -> None
         slack = SlackClient("xoxb-test", client=http)
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
@@ -608,10 +628,11 @@ async def test_circuit_breaker_resume_logged_on_workflow_start(db_session, mocke
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
         run = await run_advisory_workflow(
             db_session,
             _repo(),
-            gh,
+            scm,
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",

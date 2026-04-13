@@ -1,60 +1,19 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
 
 from config import AppConfig, RepoConfig, Settings
+from webhooks.scm.github import GitHubWebhookProvider
+from webhooks.scm.protocol import WebhookEvent, WebhookVerificationError
 
 _LOG = structlog.get_logger(__name__)
 
-_REPLAY_WINDOW_SEC = 300
-_MAX_FUTURE_SKEW_SEC = 60
-
-
-def verify_github_hub_signature_256(raw_body: bytes, secret: str, signature_header: str | None) -> None:
-    """Validate ``X-Hub-Signature-256`` per GitHub Docs (HMAC-SHA256 over raw UTF-8 body)."""
-    if not signature_header:
-        raise HTTPException(status_code=401, detail="missing X-Hub-Signature-256")
-    mac = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256)
-    expected = "sha256=" + mac.hexdigest()
-    if not hmac.compare_digest(expected, signature_header):
-        raise HTTPException(status_code=401, detail="invalid webhook signature")
-
-
-def assert_delivery_fresh_http_date(
-    date_header: str | None,
-    *,
-    now: datetime,
-    replay_window_sec: int = _REPLAY_WINDOW_SEC,
-) -> None:
-    """Reject replays when ``Date`` is present; if absent, log and continue"""
-    if not date_header:
-        _LOG.info(
-            "webhook_delivery_date_freshness_skipped",
-            metric_name="webhook_delivery_date_freshness_skipped",
-            reason="no_http_date_header",
-        )
-        return
-    try:
-        parsed = parsedate_to_datetime(date_header)
-    except TypeError, ValueError:
-        raise HTTPException(status_code=401, detail="invalid HTTP Date header") from None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    skew = (now - parsed.astimezone(UTC)).total_seconds()
-    if skew < -_MAX_FUTURE_SKEW_SEC:
-        raise HTTPException(status_code=401, detail="webhook Date too far in the future")
-    if skew > replay_window_sec:
-        raise HTTPException(status_code=401, detail="stale webhook delivery")
+_WEBHOOK_PROVIDER = GitHubWebhookProvider()
 
 
 def find_repo_config(app: AppConfig, *, owner: str, repo: str) -> RepoConfig | None:
@@ -62,15 +21,6 @@ def find_repo_config(app: AppConfig, *, owner: str, repo: str) -> RepoConfig | N
         if r.github_org == owner and r.github_repo == repo:
             return r
     return None
-
-
-def _split_full_name(full_name: str | None) -> tuple[str, str] | None:
-    if not full_name or "/" not in full_name:
-        return None
-    owner, name = full_name.split("/", 1)
-    if not owner or not name:
-        return None
-    return owner, name
 
 
 def _ghsa_from_payload(event: str, payload: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -102,18 +52,6 @@ def _ghsa_from_payload(event: str, payload: dict[str, Any]) -> tuple[str | None,
     return None, f"event_not_handled:{event}"
 
 
-def _owner_repo_from_repository_dict(repo_obj: dict[str, Any]) -> tuple[str, str] | None:
-    full_name = repo_obj.get("full_name")
-    parsed = _split_full_name(full_name) if isinstance(full_name, str) else None
-    if parsed is not None:
-        return parsed
-    owner_login = (repo_obj.get("owner") or {}).get("login") if isinstance(repo_obj.get("owner"), dict) else None
-    name = repo_obj.get("name")
-    if isinstance(owner_login, str) and isinstance(name, str):
-        return (owner_login, name)
-    return None
-
-
 def _github_webhook_special_event_response(
     event: str,
     payload: dict[str, Any],
@@ -140,13 +78,12 @@ def _github_webhook_special_event_response(
 
 
 async def _github_webhook_advisory_response(
-    event: str,
-    payload: dict[str, Any],
+    webhook_event: WebhookEvent,
     log: structlog.BoundLogger,
     app_config: AppConfig,
     enqueue_advisory: Callable[..., Awaitable[str | None]],
 ) -> Response:
-    ghsa, skip_reason = _ghsa_from_payload(event, payload)
+    ghsa, skip_reason = _ghsa_from_payload(webhook_event.event_type, webhook_event.payload)
     if skip_reason:
         log.info(
             "github_webhook_noop",
@@ -159,17 +96,12 @@ async def _github_webhook_advisory_response(
         log.warning("github_webhook_missing_ghsa", metric_name="github_webhook_noop_total")
         return Response(status_code=202)
 
-    repo_obj = payload.get("repository")
-    if not isinstance(repo_obj, dict):
-        log.warning("github_webhook_missing_repository", metric_name="github_webhook_noop_total")
-        return Response(status_code=202)
-
-    parsed = _owner_repo_from_repository_dict(repo_obj)
-    if parsed is None:
+    owner = webhook_event.repo_owner
+    repo_name = webhook_event.repo_name
+    if owner is None or repo_name is None:
         log.warning("github_webhook_repo_unparsed", metric_name="github_webhook_noop_total")
         return Response(status_code=202)
 
-    owner, repo_name = parsed
     cfg = find_repo_config(app_config, owner=owner, repo=repo_name)
     if cfg is None:
         log.info(
@@ -202,29 +134,28 @@ async def github_webhook(request: Request) -> Response:
     enqueue_advisory = request.app.state.enqueue_advisory
 
     raw = await request.body()
-    sig = request.headers.get("X-Hub-Signature-256")
-    verify_github_hub_signature_256(raw, settings.github_webhook_secret, sig)
-    assert_delivery_fresh_http_date(request.headers.get("Date"), now=datetime.now(UTC))
-
-    event = request.headers.get("X-GitHub-Event", "")
-    delivery = request.headers.get("X-GitHub-Delivery", "")
+    headers = dict(request.headers)
+    try:
+        _WEBHOOK_PROVIDER.verify_signature(raw, headers, settings.github_webhook_secret)
+        _WEBHOOK_PROVIDER.assert_delivery_fresh(headers, now=datetime.now(UTC))
+    except WebhookVerificationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
 
     try:
-        payload = json.loads(raw.decode("utf-8"))
-    except json.JSONDecodeError:
-        return JSONResponse(status_code=400, content={"detail": "invalid JSON body"})
+        webhook_event = _WEBHOOK_PROVIDER.parse_event(raw, headers)
+    except WebhookVerificationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     log = _LOG.bind(
-        github_event=event,
-        github_delivery_id=delivery or None,
+        github_event=webhook_event.event_type,
+        github_delivery_id=webhook_event.delivery_id or None,
     )
 
-    special = _github_webhook_special_event_response(event, payload, log)
+    special = _github_webhook_special_event_response(webhook_event.event_type, webhook_event.payload, log)
     if special is not None:
         return special
     return await _github_webhook_advisory_response(
-        event,
-        payload,
+        webhook_event,
         log,
         app_config,
         enqueue_advisory,

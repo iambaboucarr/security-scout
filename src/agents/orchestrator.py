@@ -15,6 +15,9 @@ Tool access (least-privilege):
     and error notifications until the Slack Handler agent is separated. Once
     interactive Slack workflows exist, Slack tool access moves to the dedicated
     handler and the orchestrator delegates via state transitions.
+
+    Receives ``SCMProvider``, not ``GitHubClient`` directly.
+    The provider is passed through to subordinate agents (triage).
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from config import RepoConfig
 from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
-from tools.github import GitHubAPIError, GitHubClient
+from tools.scm.protocol import SCMProvider
 from tools.slack import SlackAPIError, SlackClient, SlackMalformedResponseError, finding_to_report_payload
 
 _LOG = structlog.get_logger(__name__)
@@ -127,7 +130,7 @@ async def _best_effort_error_slack(
 async def run_advisory_workflow(
     session: AsyncSession,
     repo: RepoConfig,
-    gh: GitHubClient,
+    scm: SCMProvider,
     http: httpx.AsyncClient,
     slack: SlackClient,
     *,
@@ -140,10 +143,12 @@ async def run_advisory_workflow(
     schedule_retry: Callable[[ScheduleRetryParams], Awaitable[None]] | None = None,
     resume_workflow_run_id: uuid.UUID | None = None,
 ) -> WorkflowRun:
-    """Advisory path: triage then Slack report. Commits across steps for durable retry state.
+    """Run or resume the advisory triage → Slack report workflow.
 
-    When ``resume_workflow_run_id`` is set, continues an existing run (e.g. ARQ delayed retry) instead of
-    creating a new ``WorkflowRun``.
+    When *resume_workflow_run_id* is ``None`` a fresh ``WorkflowRun`` is created.
+    Pass an existing run's UUID to resume from where it left off (must be in
+    ``triaging``, ``triage_complete``, or ``reporting`` state).  The resumed run
+    keeps its original ``id``, ``started_at``, and ``retry_count``.
     """
     log = _LOG.bind(agent="orchestrator", run_id=str(run_id) if run_id else None)
     breaker = circuit_breaker or ExternalApiCircuitBreaker()
@@ -252,7 +257,7 @@ async def run_advisory_workflow(
             finding = await run_advisory_triage(
                 session,
                 repo,
-                gh,
+                scm,
                 http,
                 ghsa_id=ghsa_id,
                 advisory_source=advisory_source,
@@ -261,7 +266,7 @@ async def run_advisory_workflow(
                 llm=llm,
                 reasoning_model=reasoning_model,
             )
-        except GitHubAPIError as e:
+        except SecurityScoutError as e:
             await session.rollback()
             opened = breaker.record_failure("github")
             if opened:
@@ -290,55 +295,6 @@ async def run_advisory_workflow(
                     retry_count=run.retry_count,
                     delay_seconds=delay,
                 )
-                await schedule_retry(
-                    ScheduleRetryParams(
-                        workflow_run_id=run_stable_id,
-                        delay_seconds=delay,
-                        state=AdvisoryWorkflowState.triaging.value,
-                        reason="github_transient",
-                    ),
-                )
-                return run
-            run.state = AdvisoryWorkflowState.error_triage.value
-            run.error_message = _truncate_log(str(e), 4000)
-            run.completed_at = _now_utc()
-            await session.commit()
-            log.warning(
-                "workflow_error",
-                metric_name="workflow_error_total",
-                phase="triage",
-                workflow_run_id=str(run_stable_id),
-                err=str(e),
-            )
-            await _append_action_log(
-                session,
-                workflow_run_id=run_stable_id,
-                agent="orchestrator",
-                tool_name="triage",
-                tool_inputs={"ghsa_id": ghsa_id},
-                tool_output=str(e),
-            )
-            await session.commit()
-            await _best_effort_error_slack(
-                slack,
-                repo.slack_channel,
-                title="Advisory triage failed",
-                detail=str(e),
-                workflow_run_id=run_stable_id,
-                finding_id=None,
-            )
-            return run
-        except SecurityScoutError as e:
-            await session.rollback()
-            run = await _require_run(
-                session,
-                run_stable_id,
-                missing_message="workflow run missing after triage failure",
-            )
-            if e.is_transient and run.retry_count < 3 and schedule_retry is not None:
-                delay = max(1, 2**run.retry_count)
-                run.retry_count += 1
-                await session.commit()
                 await schedule_retry(
                     ScheduleRetryParams(
                         workflow_run_id=run_stable_id,
