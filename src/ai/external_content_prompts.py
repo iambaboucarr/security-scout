@@ -1,4 +1,4 @@
-"""System and user prompt fragments for ADR-010 content framing."""
+"""System and user prompt fragments for external-content framing."""
 
 from __future__ import annotations
 

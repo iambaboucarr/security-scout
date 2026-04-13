@@ -1,4 +1,4 @@
-"""Semantic firewall: sanitise untrusted strings before LLM prompts (ADR-010).
+"""Semantic firewall: sanitise untrusted strings before LLM prompts.
 
 Regex-based redaction targets common jailbreak phrasing; it may also alter benign vendor
 wording (e.g. lines that look like ``new instructions:``). Treat sanitised text as safe to
@@ -201,7 +201,7 @@ def sanitize_text(
 
 
 def frame_external_content(kind: ExternalContentKind, sanitized_body: str) -> str:
-    """Wrap already-sanitised text in explicit external-content delimiters (ADR-010).
+    """Wrap already-sanitised text in explicit external-content delimiters.
 
     Do not pass raw advisory/PoC/MCP text here; run :func:`sanitize_text` first, or use
     :func:`prepare_for_llm`.

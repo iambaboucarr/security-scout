@@ -33,6 +33,7 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agents.governance import GovernanceTier, decide_governance_tier
 from agents.triage import run_advisory_triage
 from ai.provider import LLMProvider
 from config import RepoConfig
@@ -52,6 +53,7 @@ class AdvisoryWorkflowState(StrEnum):
     triaging = "triaging"
     triage_complete = "triage_complete"
     reporting = "reporting"
+    awaiting_approval = "awaiting_approval"
     done = "done"
     error_triage = "error_triage"
     error_reporting = "error_reporting"
@@ -414,6 +416,42 @@ async def run_advisory_workflow(
         msg = f"unexpected workflow state before reporting: {run.state!r}"
         raise RuntimeError(msg)
 
+    tier = decide_governance_tier(finding, repo.governance)
+    await _append_action_log(
+        session,
+        workflow_run_id=run_stable_id,
+        agent="orchestrator",
+        tool_name="governance.decide",
+        tool_inputs={
+            "severity": finding.severity.value,
+            "ssvc_action": finding.ssvc_action.value if finding.ssvc_action else None,
+            "known_status": finding.known_status.value if finding.known_status else None,
+            "has_governance_config": repo.governance is not None,
+        },
+        tool_output=tier.value,
+    )
+    await session.commit()
+
+    if tier == GovernanceTier.auto_resolve and run.state == AdvisoryWorkflowState.triage_complete.value:
+        done_at = _now_utc()
+        run.state = AdvisoryWorkflowState.done.value
+        run.completed_at = done_at
+        await session.commit()
+        log.info(
+            "advisory_auto_resolved",
+            metric_name="advisory_auto_resolved_total",
+            finding_id=str(finding.id),
+            workflow_run_id=str(run_stable_id),
+        )
+        log.info(
+            "workflow_state_transition",
+            metric_name="workflow_state_current",
+            from_state=AdvisoryWorkflowState.triage_complete.value,
+            to_state=AdvisoryWorkflowState.done.value,
+            workflow_run_id=str(run_stable_id),
+        )
+        return run
+
     if breaker.take_resume_log_event("slack"):
         await _append_action_log(
             session,
@@ -596,13 +634,19 @@ async def run_advisory_workflow(
         )
         return run
 
-    done_at = _now_utc()
-    run.state = AdvisoryWorkflowState.done.value
-    run.completed_at = done_at
+    slack_delivered_at = _now_utc()
+    if tier == GovernanceTier.approve:
+        run.state = AdvisoryWorkflowState.awaiting_approval.value
+        # completed_at stays None — interactive approval handler will finalise the run.
+        terminal_state = AdvisoryWorkflowState.awaiting_approval
+    else:
+        run.state = AdvisoryWorkflowState.done.value
+        run.completed_at = slack_delivered_at
+        terminal_state = AdvisoryWorkflowState.done
     await session.commit()
 
     started = run.started_at.replace(tzinfo=UTC) if run.started_at.tzinfo is None else run.started_at
-    elapsed = (done_at - started).total_seconds()
+    elapsed = (slack_delivered_at - started).total_seconds()
     log.info(
         "advisory_to_slack_delivered",
         metric_name="advisory_to_slack_seconds",
@@ -614,7 +658,7 @@ async def run_advisory_workflow(
         "workflow_state_transition",
         metric_name="workflow_state_current",
         from_state=AdvisoryWorkflowState.reporting.value,
-        to_state=AdvisoryWorkflowState.done.value,
+        to_state=terminal_state.value,
         workflow_run_id=str(run_stable_id),
     )
 

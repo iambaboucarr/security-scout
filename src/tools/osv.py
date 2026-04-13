@@ -1,4 +1,4 @@
-"""OSV.dev queries for supply-chain context (ADR-016 §6).
+"""OSV.dev queries for supply-chain context.
 
 IDs returned include historical CVEs for the package; callers should not treat
 raw counts as malicious-package proof without a dedicated OSV/malicious signal.

@@ -53,7 +53,7 @@ class GitHubSCMProvider:
         """Escape hatch for GitHub-specific operations not on the protocol."""
         return self._client
 
-    # -- Core ADR-027 methods ------------------------------------------------
+    # -- Core SCMProvider methods --------------------------------------------
 
     async def fetch_advisory(
         self,
@@ -87,7 +87,7 @@ class GitHubSCMProvider:
         repo: str,
         ref: str,
     ) -> list[dict[str, object]]:
-        raise NotImplementedError("fetch_code_scanning_alerts: Phase 3+")
+        raise NotImplementedError("fetch_code_scanning_alerts is not implemented yet")
 
     async def fetch_pr_diff(
         self,
@@ -120,7 +120,7 @@ class GitHubSCMProvider:
         pr_number: int,
         body: str,
     ) -> None:
-        raise NotImplementedError("post_pr_comment: Phase 3+")
+        raise NotImplementedError("post_pr_comment is not implemented yet")
 
     async def set_check_run(
         self,
@@ -131,7 +131,7 @@ class GitHubSCMProvider:
         status: str,
         conclusion: str | None = None,
     ) -> None:
-        raise NotImplementedError("set_check_run: Phase 3+")
+        raise NotImplementedError("set_check_run is not implemented yet")
 
     async def trigger_workflow(
         self,
@@ -139,7 +139,7 @@ class GitHubSCMProvider:
         workflow_path: str,
         ref: str,
     ) -> None:
-        raise NotImplementedError("trigger_workflow: Phase 3+")
+        raise NotImplementedError("trigger_workflow is not implemented yet")
 
     async def clone_repo(
         self,
@@ -147,7 +147,7 @@ class GitHubSCMProvider:
         ref: str,
         dest: Path,
     ) -> Path:
-        raise NotImplementedError("clone_repo: Phase 3+")
+        raise NotImplementedError("clone_repo is not implemented yet")
 
     # -- Additional methods required by current agents -----------------------
 

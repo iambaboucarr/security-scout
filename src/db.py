@@ -65,7 +65,7 @@ async def persist_config_loaded_audit(session: AsyncSession, app: AppConfig) -> 
 
 
 async def log_and_persist_config_loaded(session: AsyncSession, app: AppConfig) -> None:
-    # ADR-015 Guardrail 6: structured log + queryable `AgentActionLog` row
+    # Structured log + queryable `AgentActionLog` row for config-load audit trail.
     log_config_loaded(app)
     await persist_config_loaded_audit(session, app)
 

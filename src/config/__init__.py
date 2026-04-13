@@ -13,6 +13,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from models import Severity, SSVCAction
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_REPOS_PATH = _REPO_ROOT / "repos.yaml"
 
@@ -69,6 +71,39 @@ IssueTrackerEntry = Annotated[
 ]
 
 
+class GovernanceRule(BaseModel):
+    """A single governance rule; all specified criteria must match a finding for it to apply."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    severity: list[Severity] | None = None
+    ssvc_action: list[SSVCAction] | None = None
+    duplicate: bool | None = None
+    patch_available: bool | None = None
+    poc_execution: bool | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_criterion(self) -> Self:
+        if all(getattr(self, f) is None for f in type(self).model_fields):
+            msg = "governance rule must specify at least one criterion"
+            raise ValueError(msg)
+        return self
+
+
+class GovernanceApprover(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    slack_user: str = Field(pattern=r"^U[A-Z0-9]{6,}$")
+
+
+class GovernanceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    auto_resolve: list[GovernanceRule] = Field(default_factory=list)
+    notify: list[GovernanceRule] = Field(default_factory=list)
+    approve: list[GovernanceRule] = Field(default_factory=list)
+
+
 class RepoConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -85,6 +120,9 @@ class RepoConfig(BaseModel):
     rate_limits: RateLimits | None = None
     issue_trackers: list[IssueTrackerEntry] = Field(default_factory=list)
     dedup_semantic_search: bool = False
+    governance: GovernanceConfig | None = None
+    # Consumed by the interactive Slack approval handler (not yet implemented).
+    approvers: list[GovernanceApprover] = Field(default_factory=list)
 
 
 class ReposManifest(BaseModel):
@@ -217,7 +255,7 @@ def configure_logging(log_level: str) -> None:
 
 
 def log_config_loaded(app: AppConfig) -> None:
-    # Pair with `db.log_and_persist_config_loaded` when a DB session exists (ADR-015 Guardrail 6).
+    # Pair with `db.log_and_persist_config_loaded` when a DB session exists.
     log = structlog.get_logger(__name__)
     log.info(
         "config_loaded",

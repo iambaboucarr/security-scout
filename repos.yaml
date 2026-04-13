@@ -19,3 +19,18 @@ repos:
         security_label: security
         search_closed: true
     dedup_semantic_search: false
+    # Tiered governance. Omit this block entirely to keep strict approval for every
+    # finding above `informational`. Precedence: approve > notify > auto_resolve.
+    # governance:
+    #   auto_resolve:
+    #     - severity: [informational, low]
+    #     - duplicate: true
+    #   notify:
+    #     - severity: [medium]
+    #     - ssvc_action: [attend, track]
+    #   approve:
+    #     - severity: [critical, high]
+    #     - ssvc_action: [immediate]
+    # approvers:
+    #   - slack_user: U12345AB  # tech lead
+    #   - slack_user: U67890CD  # senior dev

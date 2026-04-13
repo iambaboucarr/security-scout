@@ -13,7 +13,7 @@ from agents.orchestrator import (
     _truncate_log,
     run_advisory_workflow,
 )
-from config import RepoConfig
+from config import GovernanceConfig, GovernanceRule, RepoConfig
 from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
@@ -27,6 +27,7 @@ def _make_scm(gh: object) -> GitHubSCMProvider:
 
 
 def _repo() -> RepoConfig:
+    # Routes severity=high to notify tier so happy reporting paths terminate in ``done``.
     return RepoConfig(
         name="demo",
         github_org="acme",
@@ -36,6 +37,7 @@ def _repo() -> RepoConfig:
         notify_on_severity=["high"],
         require_approval_for=["critical"],
         issue_trackers=[],
+        governance=GovernanceConfig(notify=[GovernanceRule(severity=[Severity.high])]),
     )
 
 
