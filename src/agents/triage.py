@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -38,12 +39,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ai.provider import LLMProvider
 from config import RepoConfig
 from exceptions import SecurityScoutError
-from models import Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
+from models import Finding, FindingStatus, KnownStatus, Severity, SSVCAction, WorkflowKind
 from tools.input_sanitiser import ExternalContentKind, prepare_for_llm, sanitize_text
 from tools.issue_tracker import (
     GitHubIssuesAdapter,
     IssueTrackerAdapter,
+    IssueTrackerCredentials,
+    JiraIssuesAdapter,
+    LinearIssuesAdapter,
     ScoutHistoricalAdapter,
+    TrackerMatch,
     normalise_cve_id,
     run_dedup_checks,
 )
@@ -352,6 +357,8 @@ def _build_issue_tracker_adapters(
     repo: RepoConfig,
     scm: SCMProvider,
     session: AsyncSession,
+    http: httpx.AsyncClient,
+    credentials: IssueTrackerCredentials | None,
 ) -> list[IssueTrackerAdapter]:
     adapters: list[IssueTrackerAdapter] = []
     for entry in repo.issue_trackers:
@@ -364,8 +371,52 @@ def _build_issue_tracker_adapters(
                     entry,
                 ),
             )
+        elif entry.type == "jira":
+            if credentials is None or not credentials.jira_api_token:
+                _LOG.warning(
+                    "issue_tracker_skipped_missing_credentials",
+                    tracker="jira",
+                    repo=repo.name,
+                )
+                continue
+            adapters.append(JiraIssuesAdapter(http, entry, credentials))
+        elif entry.type == "linear":
+            if credentials is None or not credentials.linear_api_key:
+                _LOG.warning(
+                    "issue_tracker_skipped_missing_credentials",
+                    tracker="linear",
+                    repo=repo.name,
+                )
+                continue
+            adapters.append(LinearIssuesAdapter(http, entry, credentials))
     adapters.append(ScoutHistoricalAdapter(session))
     return adapters
+
+
+def _accepted_risk_match(
+    matches: Sequence[TrackerMatch],
+    *,
+    ttl_days: int,
+    now: datetime,
+) -> TrackerMatch | None:
+    """Return the first within-TTL accepted-risk match (Scout history only).
+
+    ``ttl_days == 0`` means acceptance never expires.
+    """
+    for m in matches:
+        if m.tracker != "scout_history" or m.status != "accepted_risk":
+            continue
+        if ttl_days <= 0:
+            return m
+        if m.last_updated is None:
+            # Treat missing timestamp as within-TTL: the finding exists but its age is
+            # unknown (e.g. historical import without dates).  Surfacing it for human
+            # review is safer than silently skipping — the operator can re-evaluate.
+            return m
+        last = m.last_updated.astimezone(UTC) if m.last_updated.tzinfo else m.last_updated.replace(tzinfo=UTC)
+        if (now - last).days <= ttl_days:
+            return m
+    return None
 
 
 def _first_cve_id(advisory: AdvisoryData) -> str | None:
@@ -395,6 +446,7 @@ async def run_advisory_triage(
     workflow_run_id: uuid.UUID | None = None,  # noqa: ARG001 — reserved for audit logging
     llm: LLMProvider | None = None,
     reasoning_model: str = "claude-sonnet-4-6",
+    tracker_credentials: IssueTrackerCredentials | None = None,
 ) -> Finding:
     log = _LOG.bind(agent="triage", run_id=str(run_id) if run_id else None)
     ghsa = normalise_ghsa_id(ghsa_id)
@@ -434,7 +486,7 @@ async def run_advisory_triage(
         conf = llm_conf
 
     cwe_for_dedup = _first_cwe_id(advisory)
-    adapters = _build_issue_tracker_adapters(repo, scm, session)
+    adapters = _build_issue_tracker_adapters(repo, scm, session, http, tracker_credentials)
     dedup_matches = await run_dedup_checks(
         cve_id=cve_id,
         ghsa_id=ghsa,
@@ -445,14 +497,25 @@ async def run_advisory_triage(
         adapters=adapters,
     )
 
+    accepted_risk_hit = _accepted_risk_match(
+        dedup_matches,
+        ttl_days=repo.accepted_risk_ttl_days,
+        now=datetime.now(UTC),
+    )
+
     dup_of: str | None = None
     dup_tracker: str | None = None
     dup_url: str | None = None
-    if dedup_matches:
-        first = dedup_matches[0]
-        dup_of = first.issue_id
-        dup_tracker = first.tracker
-        dup_url = first.issue_url
+    known_status: KnownStatus | None = None
+    primary: TrackerMatch | None = (
+        accepted_risk_hit if accepted_risk_hit is not None else (dedup_matches[0] if dedup_matches else None)
+    )
+    if primary is not None:
+        dup_of = primary.issue_id
+        dup_tracker = primary.tracker
+        dup_url = primary.issue_url
+        if accepted_risk_hit is not None:
+            known_status = KnownStatus.known_accepted_risk
 
     source_ref = advisory.html_url or f"https://github.com/advisories/{ghsa}"
     title = advisory.summary.strip() or ghsa
@@ -469,7 +532,7 @@ async def run_advisory_triage(
             "osv_prior_vulnerabilities_excluding_current": health.osv_prior_vulnerabilities_excluding_current,
             "osv_query_skipped_reason": health.osv_query_skipped_reason,
         },
-        "dedup_matches": [m.model_dump() for m in dedup_matches],
+        "dedup_matches": [m.model_dump(mode="json") for m in dedup_matches],
     }
 
     cwe_list = list(advisory.cwe_ids) if advisory.cwe_ids else None
@@ -484,7 +547,7 @@ async def run_advisory_triage(
         duplicate_of=dup_of,
         duplicate_tracker=dup_tracker,
         duplicate_url=dup_url,
-        known_status=None,
+        known_status=known_status,
         cvss_score=cvss_base,
         cvss_vector=cvss_vector,
         cve_id=cve_id,

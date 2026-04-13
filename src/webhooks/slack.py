@@ -28,6 +28,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from agents.approval import ApprovalContext, handle_slack_approval
+from agents.dedup import DedupContext, handle_slack_dedup_decision
 from config import AppConfig, Settings
 from db import session_scope
 from exceptions import SecurityScoutError
@@ -50,6 +51,27 @@ class SlackActionId(StrEnum):
     approve = "security_scout:approve"
     reject = "security_scout:reject"
     escalate = "security_scout:escalate"
+    dedup_confirm = "security_scout:dedup_confirm"
+    dedup_new_instance = "security_scout:dedup_new_instance"
+    dedup_reopen = "security_scout:dedup_reopen"
+    dedup_resolved = "security_scout:dedup_resolved"
+    risk_still_accepted = "security_scout:risk_still_accepted"
+    risk_reevaluate = "security_scout:risk_reevaluate"
+
+
+_APPROVAL_ACTION_IDS: frozenset[SlackActionId] = frozenset(
+    {SlackActionId.approve, SlackActionId.reject, SlackActionId.escalate},
+)
+_DEDUP_ACTION_IDS: frozenset[SlackActionId] = frozenset(
+    {
+        SlackActionId.dedup_confirm,
+        SlackActionId.dedup_new_instance,
+        SlackActionId.dedup_reopen,
+        SlackActionId.dedup_resolved,
+        SlackActionId.risk_still_accepted,
+        SlackActionId.risk_reevaluate,
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,8 +218,12 @@ async def slack_webhook(request: Request) -> Response:
         slack_user=payload.user_id,
     )
 
+    is_dedup = payload.action in _DEDUP_ACTION_IDS
     try:
-        ctx = ApprovalContext.from_button_value(payload.button_value)
+        if is_dedup:
+            dedup_ctx = DedupContext.from_button_value(payload.button_value)
+        else:
+            ctx = ApprovalContext.from_button_value(payload.button_value)
     except ValueError as exc:
         log.warning("slack_webhook_bad_value", err=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -206,22 +232,37 @@ async def slack_webhook(request: Request) -> Response:
         SlackClient(settings.slack_bot_token) as slack,
         session_scope(session_factory) as session,
     ):
-        await handle_slack_approval(
-            session,
-            app_config,
-            slack,
-            ctx=ctx,
-            action=payload.action,
-            user_id=payload.user_id,
-            channel_id=payload.channel_id,
-            message_ts=payload.message_ts,
-        )
+        if is_dedup:
+            await handle_slack_dedup_decision(
+                session,
+                slack,
+                ctx=dedup_ctx,
+                action_id=payload.action,
+                user_id=payload.user_id,
+                channel_id=payload.channel_id,
+                message_ts=payload.message_ts,
+            )
+            handled_finding_id = dedup_ctx.finding_id
+            handled_run_id = dedup_ctx.workflow_run_id
+        else:
+            await handle_slack_approval(
+                session,
+                app_config,
+                slack,
+                ctx=ctx,
+                action=payload.action,
+                user_id=payload.user_id,
+                channel_id=payload.channel_id,
+                message_ts=payload.message_ts,
+            )
+            handled_finding_id = ctx.finding_id
+            handled_run_id = ctx.workflow_run_id
 
     log.info(
         "slack_webhook_handled",
         metric_name="slack_webhook_handled_total",
-        finding_id=str(ctx.finding_id),
-        workflow_run_id=str(ctx.workflow_run_id),
+        finding_id=str(handled_finding_id),
+        workflow_run_id=str(handled_run_id),
     )
     return Response(status_code=200)
 

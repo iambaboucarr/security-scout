@@ -316,3 +316,37 @@ repos:
     )
     with pytest.raises(ValueError, match="armageddon"):
         load_repos_manifest(p)
+
+
+def test_repo_config_accepted_risk_ttl_defaults_to_90() -> None:
+    repo = RepoConfig(
+        name="svc",
+        github_org="o",
+        github_repo="r",
+        slack_channel="#c",
+        allowed_workflows=[],
+        notify_on_severity=["high"],
+        require_approval_for=["high"],
+    )
+    assert repo.accepted_risk_ttl_days == 90
+
+
+def test_repo_config_accepted_risk_ttl_rejects_negative() -> None:
+    with pytest.raises(ValidationError, match="accepted_risk_ttl_days"):
+        RepoConfig(
+            name="svc",
+            github_org="o",
+            github_repo="r",
+            slack_channel="#c",
+            allowed_workflows=[],
+            notify_on_severity=["high"],
+            require_approval_for=["high"],
+            accepted_risk_ttl_days=-1,
+        )
+
+
+def test_settings_tracker_credentials_default_none() -> None:
+    s = Settings()
+    assert s.jira_api_email is None
+    assert s.jira_api_token is None
+    assert s.linear_api_key is None

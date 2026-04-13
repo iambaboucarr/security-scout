@@ -63,6 +63,7 @@ class LinearTrackerConfig(BaseModel):
 
     type: Literal["linear"] = "linear"
     team_id: str
+    label_name: str = "security"
 
 
 IssueTrackerEntry = Annotated[
@@ -120,6 +121,9 @@ class RepoConfig(BaseModel):
     rate_limits: RateLimits | None = None
     issue_trackers: list[IssueTrackerEntry] = Field(default_factory=list)
     dedup_semantic_search: bool = False
+    # Days a previously-accepted risk remains valid before re-detection re-enters the pipeline.
+    # ``0`` disables expiry (acceptances are permanent until manually cleared).
+    accepted_risk_ttl_days: int = Field(default=90, ge=0)
     governance: GovernanceConfig | None = None
     # Notified by the interactive Slack approval handler on escalation.
     approvers: list[GovernanceApprover] = Field(default_factory=list)
@@ -166,6 +170,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     anthropic_api_key: str | None = None
+
+    # Issue tracker credentials (per-tracker; only required for trackers actually configured in repos.yaml).
+    # JIRA Cloud Basic auth uses email + token; for self-hosted Server PATs, leave email unset to send Bearer.
+    jira_api_email: str | None = None
+    jira_api_token: str | None = None
+    linear_api_key: str | None = None
 
     repos_config_path: Path = Field(default=_DEFAULT_REPOS_PATH)
 

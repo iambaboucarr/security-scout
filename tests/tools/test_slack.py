@@ -7,11 +7,17 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from models import Finding, FindingStatus, Severity, WorkflowKind
+from models import Finding, FindingStatus, KnownStatus, Severity, WorkflowKind
 from tools.slack import (
     ACTION_ID_APPROVE,
+    ACTION_ID_DEDUP_CONFIRM,
+    ACTION_ID_DEDUP_NEW_INSTANCE,
+    ACTION_ID_DEDUP_REOPEN,
+    ACTION_ID_DEDUP_RESOLVED,
     ACTION_ID_ESCALATE,
     ACTION_ID_REJECT,
+    ACTION_ID_RISK_REEVALUATE,
+    ACTION_ID_RISK_STILL_ACCEPTED,
     ApprovalButtonContext,
     DedupMatchInfo,
     FindingReportPayload,
@@ -322,6 +328,110 @@ def test_build_finding_blocks_without_approval_context_has_no_buttons() -> None:
     r = _sample_report()
     blocks = build_finding_blocks(r)
     assert not any(b.get("type") == "actions" for b in blocks)
+
+
+def test_build_finding_blocks_with_dedup_and_approval_context_adds_dedup_buttons() -> None:
+    r = _sample_report(
+        dedup=DedupMatchInfo(
+            tier=1,
+            tracker_name="jira",
+            match_url="https://acme.atlassian.net/browse/SEC-1",
+            duplicate_of="SEC-1",
+        ),
+    )
+    ctx = ApprovalButtonContext(
+        finding_id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
+        workflow_run_id=uuid.UUID("66666666-7777-8888-9999-aaaaaaaaaaaa"),
+        repo_name="demo",
+    )
+    blocks = build_finding_blocks(r, approval_context=ctx)
+    actions = [b for b in blocks if b.get("type") == "actions"]
+    # Two action blocks: dedup buttons (4) + approval buttons (3).
+    assert len(actions) == 2
+    dedup_block = next(b for b in actions if b.get("block_id") == "security_scout_dedup_actions")
+    approval_block = next(b for b in actions if b.get("block_id") == "security_scout_actions")
+    assert [e["action_id"] for e in dedup_block["elements"]] == [
+        ACTION_ID_DEDUP_CONFIRM,
+        ACTION_ID_DEDUP_NEW_INSTANCE,
+        ACTION_ID_DEDUP_REOPEN,
+        ACTION_ID_DEDUP_RESOLVED,
+    ]
+    assert [e["action_id"] for e in approval_block["elements"]] == [
+        ACTION_ID_APPROVE,
+        ACTION_ID_REJECT,
+        ACTION_ID_ESCALATE,
+    ]
+    encoded = ctx.encode()
+    for element in dedup_block["elements"]:
+        assert element["value"] == encoded
+
+
+def test_build_finding_blocks_with_dedup_but_no_approval_context_has_no_dedup_buttons() -> None:
+    r = _sample_report(
+        dedup=DedupMatchInfo(
+            tier=1,
+            tracker_name="jira",
+            duplicate_of="SEC-1",
+        ),
+    )
+    blocks = build_finding_blocks(r)
+    assert not any(b.get("type") == "actions" for b in blocks)
+
+
+def test_build_finding_blocks_accepted_risk_replaces_approval_buttons_with_risk_buttons() -> None:
+    r = _sample_report(
+        dedup=DedupMatchInfo(
+            tier=1,
+            tracker_name="scout_history",
+            duplicate_of="prior-finding-uuid",
+            is_accepted_risk=True,
+        ),
+    )
+    ctx = ApprovalButtonContext(
+        finding_id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
+        workflow_run_id=uuid.UUID("66666666-7777-8888-9999-aaaaaaaaaaaa"),
+        repo_name="demo",
+    )
+    blocks = build_finding_blocks(r, approval_context=ctx)
+    actions = [b for b in blocks if b.get("type") == "actions"]
+    assert len(actions) == 1
+    assert actions[0].get("block_id") == "security_scout_risk_actions"
+    assert [e["action_id"] for e in actions[0]["elements"]] == [
+        ACTION_ID_RISK_STILL_ACCEPTED,
+        ACTION_ID_RISK_REEVALUATE,
+    ]
+
+
+def test_build_finding_blocks_accepted_risk_section_renders_label() -> None:
+    r = _sample_report(
+        dedup=DedupMatchInfo(
+            tier=1,
+            tracker_name="scout_history",
+            duplicate_of="prior",
+            is_accepted_risk=True,
+        ),
+    )
+    blocks = build_finding_blocks(r)
+    dumped = json.dumps(blocks)
+    assert "Previously Accepted Risk" in dumped
+    assert "Known vulnerability match" not in dumped
+
+
+def test_finding_to_report_payload_marks_accepted_risk_when_known_status_is_accepted_risk() -> None:
+    f = Finding(
+        id=uuid.uuid4(),
+        workflow=WorkflowKind.advisory,
+        source_ref="https://github.com/advisories/GHSA-TEST",
+        severity=Severity.high,
+        status=FindingStatus.unconfirmed,
+        title="t",
+        duplicate_of="prior-finding-uuid",
+        duplicate_tracker="scout_history",
+        known_status=KnownStatus.known_accepted_risk,
+    )
+    p = finding_to_report_payload(f)
+    assert p.dedup is not None
+    assert p.dedup.is_accepted_risk is True
 
 
 def test_build_finding_blocks_informational_adds_badge() -> None:

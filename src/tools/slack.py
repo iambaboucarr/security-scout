@@ -14,12 +14,18 @@ from slack_sdk.models.blocks.basic_components import MarkdownTextObject, PlainTe
 from slack_sdk.models.blocks.block_elements import ButtonElement
 
 from exceptions import SecurityScoutError
-from models import Finding
+from models import Finding, KnownStatus
 
 __all__ = [
     "ACTION_ID_APPROVE",
+    "ACTION_ID_DEDUP_CONFIRM",
+    "ACTION_ID_DEDUP_NEW_INSTANCE",
+    "ACTION_ID_DEDUP_REOPEN",
+    "ACTION_ID_DEDUP_RESOLVED",
     "ACTION_ID_ESCALATE",
     "ACTION_ID_REJECT",
+    "ACTION_ID_RISK_REEVALUATE",
+    "ACTION_ID_RISK_STILL_ACCEPTED",
     "ApprovalButtonContext",
     "DedupMatchInfo",
     "FindingReportPayload",
@@ -35,6 +41,14 @@ __all__ = [
 ACTION_ID_APPROVE = "security_scout:approve"
 ACTION_ID_REJECT = "security_scout:reject"
 ACTION_ID_ESCALATE = "security_scout:escalate"
+
+ACTION_ID_DEDUP_CONFIRM = "security_scout:dedup_confirm"
+ACTION_ID_DEDUP_NEW_INSTANCE = "security_scout:dedup_new_instance"
+ACTION_ID_DEDUP_REOPEN = "security_scout:dedup_reopen"
+ACTION_ID_DEDUP_RESOLVED = "security_scout:dedup_resolved"
+
+ACTION_ID_RISK_STILL_ACCEPTED = "security_scout:risk_still_accepted"
+ACTION_ID_RISK_REEVALUATE = "security_scout:risk_reevaluate"
 
 _LOG = structlog.get_logger(__name__)
 
@@ -113,6 +127,10 @@ class DedupMatchInfo(BaseModel):
     tracker_name: str
     match_url: str | None = None
     duplicate_of: str | None = None
+    # ``True`` when the match is a previously-accepted-risk finding within TTL.
+    # Renders the "Previously Accepted Risk" variant with Still Accepted / Re-evaluate buttons
+    # in place of the standard Approve / Reject / Escalate block.
+    is_accepted_risk: bool = False
 
 
 class FindingReportPayload(BaseModel):
@@ -213,6 +231,7 @@ def finding_to_report_payload(finding: Finding) -> FindingReportPayload:
             tracker_name=finding.duplicate_tracker,
             match_url=finding.duplicate_url,
             duplicate_of=finding.duplicate_of,
+            is_accepted_risk=finding.known_status == KnownStatus.known_accepted_risk,
         )
     desc_excerpt: str | None = None
     if finding.description:
@@ -283,16 +302,72 @@ def _cvss_line_for_report(report: FindingReportPayload) -> str:
 
 
 def _dedup_section_block(dedup: DedupMatchInfo) -> SectionBlock:
-    lines = [
-        f"*Known vulnerability match* (tier {dedup.tier})",
-        f"*Tracker:* {escape_slack_mrkdwn(dedup.tracker_name)}",
-    ]
+    if dedup.is_accepted_risk:
+        lines = [
+            "*Previously Accepted Risk*",
+            f"*Tracker:* {escape_slack_mrkdwn(dedup.tracker_name)}",
+        ]
+    else:
+        lines = [
+            f"*Known vulnerability match* (tier {dedup.tier})",
+            f"*Tracker:* {escape_slack_mrkdwn(dedup.tracker_name)}",
+        ]
     if dedup.duplicate_of:
         lines.append(f"*Match:* {escape_slack_mrkdwn(dedup.duplicate_of)}")
     if dedup.match_url:
         u = _slack_link_url(dedup.match_url)
         lines.append(f"*Link:* <{u}|View match>")
     return SectionBlock(text=MarkdownTextObject(text="\n".join(lines)))
+
+
+def _build_dedup_actions_block(ctx: ApprovalButtonContext) -> ActionsBlock:
+    encoded = ctx.encode()
+    return ActionsBlock(
+        block_id="security_scout_dedup_actions",
+        elements=[
+            ButtonElement(
+                text=PlainTextObject(text="Confirm Duplicate"),
+                action_id=ACTION_ID_DEDUP_CONFIRM,
+                value=encoded,
+            ),
+            ButtonElement(
+                text=PlainTextObject(text="New Instance"),
+                action_id=ACTION_ID_DEDUP_NEW_INSTANCE,
+                value=encoded,
+            ),
+            ButtonElement(
+                text=PlainTextObject(text="Reopen"),
+                action_id=ACTION_ID_DEDUP_REOPEN,
+                value=encoded,
+            ),
+            ButtonElement(
+                text=PlainTextObject(text="Confirm Resolved"),
+                action_id=ACTION_ID_DEDUP_RESOLVED,
+                value=encoded,
+            ),
+        ],
+    )
+
+
+def _build_accepted_risk_actions_block(ctx: ApprovalButtonContext) -> ActionsBlock:
+    encoded = ctx.encode()
+    return ActionsBlock(
+        block_id="security_scout_risk_actions",
+        elements=[
+            ButtonElement(
+                text=PlainTextObject(text="Still Accepted"),
+                action_id=ACTION_ID_RISK_STILL_ACCEPTED,
+                style="primary",
+                value=encoded,
+            ),
+            ButtonElement(
+                text=PlainTextObject(text="Re-evaluate"),
+                action_id=ACTION_ID_RISK_REEVALUATE,
+                style="danger",
+                value=encoded,
+            ),
+        ],
+    )
 
 
 def _footer_context_text(
@@ -411,6 +486,8 @@ def build_finding_blocks(
 
     if report.dedup is not None:
         blocks.append(_dedup_section_block(report.dedup))
+        if approval_context is not None and not report.dedup.is_accepted_risk:
+            blocks.append(_build_dedup_actions_block(approval_context))
 
     blocks.append(DividerBlock())
 
@@ -418,7 +495,10 @@ def build_finding_blocks(
     blocks.append(ContextBlock(elements=[MarkdownTextObject(text=ctx)]))
 
     if approval_context is not None:
-        blocks.append(_build_approval_actions_block(approval_context))
+        if report.dedup is not None and report.dedup.is_accepted_risk:
+            blocks.append(_build_accepted_risk_actions_block(approval_context))
+        else:
+            blocks.append(_build_approval_actions_block(approval_context))
 
     return [cast(dict[str, Any], b.to_dict()) for b in blocks]
 

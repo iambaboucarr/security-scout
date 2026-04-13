@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import json
 import uuid
 
 import httpx
 import pytest
 
-from config import GitHubIssuesTrackerConfig, configure_logging
+from config import (
+    GitHubIssuesTrackerConfig,
+    JiraTrackerConfig,
+    LinearTrackerConfig,
+    configure_logging,
+)
 from models import Finding, Severity, WorkflowKind
 from tools.github import GitHubClient
 from tools.issue_tracker import (
     GitHubIssuesAdapter,
+    IssueTrackerCredentials,
+    JiraIssuesAdapter,
+    LinearIssuesAdapter,
     ScoutHistoricalAdapter,
     TrackerMatch,
+    _jira_escape_text,
     dedupe_tracker_matches,
     normalise_cve_id,
     run_dedup_checks,
@@ -33,6 +43,16 @@ def test_normalise_cve_id() -> None:
 def test_normalise_cve_id_rejects_invalid() -> None:
     with pytest.raises(ValueError, match="invalid CVE"):
         normalise_cve_id("not-a-cve")
+
+
+def test_jira_escape_text_escapes_reserved_chars() -> None:
+    assert _jira_escape_text("CVE-2024-9999") == "CVE\\-2024\\-9999"
+
+
+def test_jira_escape_text_escapes_quotes_without_double_escaping() -> None:
+    result = _jira_escape_text('value with "quotes"')
+    assert result == 'value with \\"quotes\\"'
+    assert '\\\\"' not in result
 
 
 @pytest.mark.asyncio
@@ -286,6 +306,183 @@ async def test_run_dedup_checks_dedupes_and_logs_metrics(
     logged = capsys.readouterr().out
     assert "dedup_latency_seconds" in logged
     assert "dedup_match_total" in logged
+
+
+@pytest.mark.asyncio
+async def test_jira_adapter_searches_by_cve_with_basic_auth() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        assert request.url.path == "/rest/api/3/search"
+        return httpx.Response(
+            200,
+            json={
+                "issues": [
+                    {
+                        "key": "SEC-42",
+                        "fields": {
+                            "summary": "CVE-2024-9999 — patch libfoo",
+                            "status": {
+                                "name": "In Progress",
+                                "statusCategory": {"key": "indeterminate"},
+                            },
+                            "updated": "2026-04-01T12:00:00.000+0000",
+                        },
+                    }
+                ]
+            },
+        )
+
+    cfg = JiraTrackerConfig(project_key="SEC", base_url="https://acme.atlassian.net")
+    creds = IssueTrackerCredentials(jira_email="ops@acme.io", jira_api_token="token-abc")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = JiraIssuesAdapter(client, cfg, creds)
+        matches = await adapter.search_known_vulnerability(
+            "CVE-2024-9999",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    assert len(matches) == 1
+    m = matches[0]
+    assert m.tracker == "jira"
+    assert m.issue_id == "SEC-42"
+    assert m.issue_url == "https://acme.atlassian.net/browse/SEC-42"
+    assert m.match_field == "cve_id"
+    assert m.matched_value == "CVE-2024-9999"
+    assert m.status == "in_progress"
+    assert m.last_updated is not None
+
+    assert captured
+    auth = captured[0].headers.get("Authorization")
+    assert auth is not None
+    assert auth.startswith("Basic ")
+    jql = captured[0].url.params.get("jql")
+    assert jql is not None
+    assert 'project = "SEC"' in jql
+    assert "CVE\\-2024\\-9999" in jql  # JQL reserved chars escaped
+
+
+@pytest.mark.asyncio
+async def test_jira_adapter_uses_bearer_when_no_email() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"issues": []})
+
+    cfg = JiraTrackerConfig(project_key="SEC", base_url="https://jira.acme.local")
+    creds = IssueTrackerCredentials(jira_email=None, jira_api_token="pat-xyz")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = JiraIssuesAdapter(client, cfg, creds)
+        await adapter.search_known_vulnerability("CVE-2024-9999", None, None, None, None, None)
+
+    assert captured[0].headers.get("Authorization") == "Bearer pat-xyz"
+
+
+@pytest.mark.asyncio
+async def test_jira_adapter_swallows_http_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    cfg = JiraTrackerConfig(project_key="SEC", base_url="https://acme.atlassian.net")
+    creds = IssueTrackerCredentials(jira_email="ops@acme.io", jira_api_token="t")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = JiraIssuesAdapter(client, cfg, creds)
+        matches = await adapter.search_known_vulnerability("CVE-2024-9999", None, None, None, None, None)
+    assert matches == []
+
+
+def test_jira_adapter_rejects_missing_token() -> None:
+    cfg = JiraTrackerConfig(project_key="SEC", base_url="https://acme.atlassian.net")
+    with pytest.raises(ValueError, match="JIRA_API_TOKEN"):
+        JiraIssuesAdapter(httpx.AsyncClient(), cfg, IssueTrackerCredentials())
+
+
+@pytest.mark.asyncio
+async def test_linear_adapter_searches_by_ghsa_with_label_filter() -> None:
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        captured.append(body)
+        assert request.url == httpx.URL("https://api.linear.app/graphql")
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "id": "uuid-1",
+                                "identifier": "SEC-7",
+                                "title": "Triage GHSA-ABCD-EFGH-IJKL",
+                                "url": "https://linear.app/acme/issue/SEC-7",
+                                "updatedAt": "2026-03-15T08:00:00.000Z",
+                                "state": {"name": "In Progress", "type": "started"},
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    cfg = LinearTrackerConfig(team_id="TEAM-1", label_name="security")
+    creds = IssueTrackerCredentials(linear_api_key="lin_api_xyz")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = LinearIssuesAdapter(client, cfg, creds)
+        matches = await adapter.search_known_vulnerability(
+            None,
+            "GHSA-ABCD-EFGH-IJKL",
+            None,
+            None,
+            None,
+            None,
+        )
+
+    assert len(matches) == 1
+    m = matches[0]
+    assert m.tracker == "linear"
+    assert m.issue_id == "SEC-7"
+    assert m.issue_url == "https://linear.app/acme/issue/SEC-7"
+    assert m.match_field == "ghsa_id"
+    assert m.matched_value == "GHSA-ABCD-EFGH-IJKL"
+    assert m.status == "in_progress"
+
+    assert captured
+    body = captured[0]
+    assert "filter" in body["variables"]  # type: ignore[index]
+    f = body["variables"]["filter"]  # type: ignore[index]
+    assert f["team"]["id"]["eq"] == "TEAM-1"
+    assert f["labels"]["name"]["eq"] == "security"
+
+
+def test_linear_adapter_rejects_missing_api_key() -> None:
+    cfg = LinearTrackerConfig(team_id="TEAM-1")
+    with pytest.raises(ValueError, match="LINEAR_API_KEY"):
+        LinearIssuesAdapter(httpx.AsyncClient(), cfg, IssueTrackerCredentials())
+
+
+@pytest.mark.asyncio
+async def test_linear_adapter_handles_graphql_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"errors": [{"message": "bad request"}]})
+
+    cfg = LinearTrackerConfig(team_id="TEAM-1")
+    creds = IssueTrackerCredentials(linear_api_key="key")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = LinearIssuesAdapter(client, cfg, creds)
+        matches = await adapter.search_known_vulnerability("CVE-2024-9999", None, None, None, None, None)
+    assert matches == []
 
 
 def test_dedupe_tracker_matches() -> None:
