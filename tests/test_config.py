@@ -1,9 +1,12 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from config import (
     AppConfig,
+    GovernanceConfig,
+    GovernanceRule,
     RepoConfig,
     RepoMode,
     ReposManifest,
@@ -14,6 +17,7 @@ from config import (
     load_repos_manifest,
     log_config_loaded,
 )
+from models import Severity, SSVCAction
 
 
 def _minimal_settings(repos_path: Path) -> Settings:
@@ -205,3 +209,110 @@ def test_settings_secret_fields_have_local_dev_defaults() -> None:
     assert Settings.model_fields["github_pat"].default == "dev-local-github-pat"
     assert Settings.model_fields["slack_bot_token"].default == "xoxb-dev-local-placeholder"
     assert Settings.model_fields["slack_signing_secret"].default == "dev-local-slack-signing-secret"
+
+
+def test_governance_defaults_to_none_when_block_absent(tmp_path: Path) -> None:
+    p = tmp_path / "repos.yaml"
+    _write_manifest(
+        p,
+        """
+repos:
+  - name: svc
+    github_org: o
+    github_repo: r
+    slack_channel: "#c"
+    allowed_workflows: []
+    notify_on_severity: [high]
+    require_approval_for: [high]
+""",
+    )
+    manifest, _ = load_repos_manifest(p)
+    assert manifest.repos[0].governance is None
+    assert manifest.repos[0].approvers == []
+
+
+def test_governance_block_parses_rules_and_approvers(tmp_path: Path) -> None:
+    p = tmp_path / "repos.yaml"
+    _write_manifest(
+        p,
+        """
+repos:
+  - name: svc
+    github_org: o
+    github_repo: r
+    slack_channel: "#c"
+    allowed_workflows: []
+    notify_on_severity: [high]
+    require_approval_for: [high]
+    governance:
+      auto_resolve:
+        - severity: [informational, low]
+        - duplicate: true
+      notify:
+        - severity: [medium]
+        - ssvc_action: [attend, track]
+      approve:
+        - severity: [critical, high]
+        - ssvc_action: [immediate]
+        - poc_execution: true
+    approvers:
+      - slack_user: U12345AB
+      - slack_user: U67890CD
+""",
+    )
+    manifest, _ = load_repos_manifest(p)
+    gov = manifest.repos[0].governance
+    assert isinstance(gov, GovernanceConfig)
+    assert gov.auto_resolve[0].severity == [Severity.informational, Severity.low]
+    assert gov.auto_resolve[1].duplicate is True
+    assert gov.notify[1].ssvc_action == [SSVCAction.attend, SSVCAction.track]
+    assert gov.approve[2].poc_execution is True
+    assert [a.slack_user for a in manifest.repos[0].approvers] == ["U12345AB", "U67890CD"]
+
+
+def test_governance_rejects_empty_rule() -> None:
+    with pytest.raises(ValidationError, match="at least one criterion"):
+        GovernanceRule()
+
+
+def test_governance_rejects_bad_slack_user(tmp_path: Path) -> None:
+    p = tmp_path / "repos.yaml"
+    _write_manifest(
+        p,
+        """
+repos:
+  - name: svc
+    github_org: o
+    github_repo: r
+    slack_channel: "#c"
+    allowed_workflows: []
+    notify_on_severity: [high]
+    require_approval_for: [high]
+    approvers:
+      - slack_user: alice
+""",
+    )
+    with pytest.raises(ValueError, match="slack_user"):
+        load_repos_manifest(p)
+
+
+def test_governance_rejects_unknown_severity_value(tmp_path: Path) -> None:
+    p = tmp_path / "repos.yaml"
+    _write_manifest(
+        p,
+        """
+repos:
+  - name: svc
+    github_org: o
+    github_repo: r
+    slack_channel: "#c"
+    allowed_workflows: []
+    notify_on_severity: [high]
+    require_approval_for: [high]
+    governance:
+      approve:
+        - severity: [armageddon]
+""",
+    )
+    with pytest.raises(ValueError, match="armageddon"):
+        load_repos_manifest(p)

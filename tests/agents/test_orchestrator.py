@@ -7,8 +7,8 @@ import pytest
 from sqlalchemy import select
 
 from agents.orchestrator import AdvisoryWorkflowState, ScheduleRetryParams, run_advisory_workflow
-from config import RepoConfig
-from models import AgentActionLog, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
+from config import GovernanceConfig, GovernanceRule, RepoConfig
+from models import AgentActionLog, Finding, FindingStatus, KnownStatus, Severity, SSVCAction, WorkflowKind
 from tools.circuit_breaker import ExternalApiCircuitBreaker
 from tools.github import GitHubAPIError, GitHubClient
 from tools.scm.github import GitHubSCMProvider
@@ -19,7 +19,17 @@ def _make_scm(gh: object) -> GitHubSCMProvider:
     return GitHubSCMProvider.from_client(gh)  # type: ignore[arg-type]
 
 
-def _repo() -> RepoConfig:
+def _repo(governance: GovernanceConfig | None = None) -> RepoConfig:
+    # Default governance sends severity=high to the notify tier so existing happy-path
+    # tests continue to terminate in ``done``. Tests that want to exercise default strict
+    # behaviour or other tiers pass an explicit ``governance=`` value.
+    gov = (
+        governance
+        if governance is not None
+        else GovernanceConfig(
+            notify=[GovernanceRule(severity=[Severity.high])],
+        )
+    )
     return RepoConfig(
         name="demo",
         github_org="acme",
@@ -29,6 +39,7 @@ def _repo() -> RepoConfig:
         notify_on_severity=["high"],
         require_approval_for=["critical"],
         issue_trackers=[],
+        governance=gov,
     )
 
 
@@ -279,3 +290,210 @@ async def test_advisory_to_slack_seconds_metric_emitted(db_session, mocker) -> N
     kw = metric_calls[0].kwargs
     assert kw["duration_seconds"] >= 0
     assert "workflow_run_id" in kw
+
+
+# ── Governance tiering ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_auto_resolve_tier_skips_slack_and_finishes(db_session, mocker) -> None:
+    """auto_resolve tier: log decision, transition to done, never call Slack."""
+    repo = _repo(
+        governance=GovernanceConfig(auto_resolve=[GovernanceRule(duplicate=True)]),
+    )
+
+    async def fake_triage(session, *_a: object, **_k: object) -> Finding:
+        f = Finding(
+            workflow=WorkflowKind.advisory,
+            source_ref="https://github.com/advisories/GHSA-DUP",
+            severity=Severity.low,
+            ssvc_action=SSVCAction.track,
+            status=FindingStatus.unconfirmed,
+            triage_confidence=0.6,
+            known_status=KnownStatus.duplicate,
+            title="Duplicate advisory",
+        )
+        session.add(f)
+        await session.flush()
+        return f
+
+    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+
+    slack_calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        slack_calls.append(request)
+        return httpx.Response(200, json={"ok": True, "channel": "C", "ts": "1.0"})
+
+    async with httpx.AsyncClient(base_url="https://slack.com/api", transport=httpx.MockTransport(handler)) as http:
+        slack = SlackClient("xoxb-test", client=http)
+        gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
+        run = await run_advisory_workflow(
+            db_session,
+            repo,
+            scm,
+            http,
+            slack,
+            ghsa_id="GHSA-TEST-ABCD-EFGH",
+        )
+
+    assert run.state == AdvisoryWorkflowState.done.value
+    assert run.completed_at is not None
+    assert slack_calls == []  # no Slack post for auto_resolve
+
+    logs = (
+        (await db_session.execute(select(AgentActionLog).where(AgentActionLog.workflow_run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    gov_logs = [log for log in logs if log.tool_name == "governance.decide"]
+    assert len(gov_logs) == 1
+    assert gov_logs[0].tool_output == "auto_resolve"
+
+
+@pytest.mark.asyncio
+async def test_notify_tier_posts_slack_and_finishes(db_session, mocker) -> None:
+    """notify tier: post to Slack, transition straight to done (non-blocking)."""
+
+    async def fake_triage(session, *_a: object, **_k: object) -> Finding:
+        f = Finding(
+            workflow=WorkflowKind.advisory,
+            source_ref="https://github.com/advisories/GHSA-NOTIFY",
+            severity=Severity.medium,
+            ssvc_action=SSVCAction.attend,
+            status=FindingStatus.unconfirmed,
+            triage_confidence=0.7,
+            title="Medium advisory",
+        )
+        session.add(f)
+        await session.flush()
+        return f
+
+    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+
+    repo = _repo(
+        governance=GovernanceConfig(notify=[GovernanceRule(severity=[Severity.medium])]),
+    )
+
+    async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
+        slack = SlackClient("xoxb-test", client=http)
+        gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
+        run = await run_advisory_workflow(
+            db_session,
+            repo,
+            scm,
+            http,
+            slack,
+            ghsa_id="GHSA-TEST-ABCD-EFGH",
+        )
+
+    assert run.state == AdvisoryWorkflowState.done.value
+    assert run.completed_at is not None
+    logs = (
+        (await db_session.execute(select(AgentActionLog).where(AgentActionLog.workflow_run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    gov_logs = [log for log in logs if log.tool_name == "governance.decide"]
+    assert len(gov_logs) == 1
+    assert gov_logs[0].tool_output == "notify"
+
+
+@pytest.mark.asyncio
+async def test_approve_tier_parks_in_awaiting_approval(db_session, mocker) -> None:
+    """approve tier: Slack posted, run parked awaiting human approval (no completed_at)."""
+
+    async def fake_triage(session, *_a: object, **_k: object) -> Finding:
+        f = Finding(
+            workflow=WorkflowKind.advisory,
+            source_ref="https://github.com/advisories/GHSA-CRIT",
+            severity=Severity.critical,
+            ssvc_action=SSVCAction.immediate,
+            status=FindingStatus.unconfirmed,
+            triage_confidence=0.95,
+            title="Critical advisory",
+        )
+        session.add(f)
+        await session.flush()
+        return f
+
+    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+
+    repo = _repo(
+        governance=GovernanceConfig(approve=[GovernanceRule(severity=[Severity.critical])]),
+    )
+
+    async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
+        slack = SlackClient("xoxb-test", client=http)
+        gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
+        run = await run_advisory_workflow(
+            db_session,
+            repo,
+            scm,
+            http,
+            slack,
+            ghsa_id="GHSA-TEST-ABCD-EFGH",
+        )
+
+    assert run.state == AdvisoryWorkflowState.awaiting_approval.value
+    assert run.completed_at is None  # intentionally unfinished — interactive approval will finalise
+    logs = (
+        (await db_session.execute(select(AgentActionLog).where(AgentActionLog.workflow_run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    gov_logs = [log for log in logs if log.tool_name == "governance.decide"]
+    assert len(gov_logs) == 1
+    assert gov_logs[0].tool_output == "approve"
+
+
+@pytest.mark.asyncio
+async def test_default_governance_parks_high_severity_in_awaiting_approval(db_session, mocker) -> None:
+    """No governance block: non-informational severity defaults to approve tier (strict)."""
+
+    async def fake_triage(session, *_a: object, **_k: object) -> Finding:
+        f = Finding(
+            workflow=WorkflowKind.advisory,
+            source_ref="https://github.com/advisories/GHSA-DEFAULT",
+            severity=Severity.high,
+            ssvc_action=SSVCAction.act,
+            status=FindingStatus.unconfirmed,
+            triage_confidence=0.8,
+            title="High advisory",
+        )
+        session.add(f)
+        await session.flush()
+        return f
+
+    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+
+    # Explicitly pass RepoConfig without governance to exercise the default.
+    repo_no_gov = RepoConfig(
+        name="demo",
+        github_org="acme",
+        github_repo="app",
+        slack_channel="#security",
+        allowed_workflows=[],
+        notify_on_severity=["high"],
+        require_approval_for=["critical"],
+        issue_trackers=[],
+    )
+
+    async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
+        slack = SlackClient("xoxb-test", client=http)
+        gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
+        run = await run_advisory_workflow(
+            db_session,
+            repo_no_gov,
+            scm,
+            http,
+            slack,
+            ghsa_id="GHSA-TEST-ABCD-EFGH",
+        )
+
+    assert run.state == AdvisoryWorkflowState.awaiting_approval.value
+    assert run.completed_at is None

@@ -1,9 +1,3 @@
-"""WebhookProvider protocol — platform-agnostic webhook verification and parsing.
-
-ADR-027: webhook handlers use ``WebhookProvider`` to verify signatures,
-check freshness, and parse events without coupling to a specific SCM platform.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Mapping

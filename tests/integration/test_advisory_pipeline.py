@@ -37,6 +37,8 @@ _ADVISORY_JSON: dict[str, Any] = {
 
 def _manifest(tmp_path: Path) -> Path:
     p = tmp_path / "repos.yaml"
+    # Governance routes `high` to the notify tier so the end-to-end pipeline terminates
+    # in `done` (the interactive approval loop is not yet implemented).
     p.write_text(
         "repos:\n"
         "  - name: demo\n"
@@ -45,7 +47,10 @@ def _manifest(tmp_path: Path) -> Path:
         "    slack_channel: '#sec-alerts'\n"
         "    allowed_workflows: []\n"
         "    notify_on_severity: [high]\n"
-        "    require_approval_for: [critical]\n",
+        "    require_approval_for: [critical]\n"
+        "    governance:\n"
+        "      notify:\n"
+        "        - severity: [high]\n",
         encoding="utf-8",
     )
     return p

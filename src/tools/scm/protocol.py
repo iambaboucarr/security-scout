@@ -41,7 +41,7 @@ class SCMProvider(Protocol):
         repo: str,
         ref: str,
     ) -> list[dict[str, object]]:
-        """Return code-scanning alerts for *repo* at *ref* (Phase 3+)."""
+        """Return code-scanning alerts for *repo* at *ref*."""
         ...
 
     async def fetch_pr_diff(
@@ -61,7 +61,7 @@ class SCMProvider(Protocol):
         pr_number: int,
         body: str,
     ) -> None:
-        """Post an inline or general comment on a pull request (Phase 3+)."""
+        """Post an inline or general comment on a pull request."""
         ...
 
     async def set_check_run(
@@ -73,7 +73,7 @@ class SCMProvider(Protocol):
         status: str,
         conclusion: str | None = None,
     ) -> None:
-        """Create or update a check run on a commit (Phase 3+)."""
+        """Create or update a check run on a commit."""
         ...
 
     async def trigger_workflow(
@@ -82,7 +82,7 @@ class SCMProvider(Protocol):
         workflow_path: str,
         ref: str,
     ) -> None:
-        """Dispatch a repository workflow (Phase 3+)."""
+        """Dispatch a repository workflow."""
         ...
 
     async def clone_repo(
@@ -91,7 +91,7 @@ class SCMProvider(Protocol):
         ref: str,
         dest: Path,
     ) -> Path:
-        """Clone a repository to *dest* at the given *ref* (Phase 3+)."""
+        """Clone a repository to *dest* at the given *ref*."""
         ...
 
     # -- Additional methods required by current agents -----------------------

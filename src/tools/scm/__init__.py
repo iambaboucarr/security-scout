@@ -1,4 +1,4 @@
-"""SCM provider abstraction (ADR-027).
+"""SCM provider abstraction.
 
 Agents import from this package, not from ``tools.github`` directly.
 """

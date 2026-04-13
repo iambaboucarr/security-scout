@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from agents.orchestrator import AdvisoryWorkflowState, ScheduleRetryParams, run_advisory_workflow
-from config import RepoConfig
+from config import GovernanceConfig, GovernanceRule, RepoConfig
 from models import Finding, FindingStatus, Severity, SSVCAction, WorkflowKind, WorkflowRun
 from tools.github import GitHubAPIError, GitHubClient
 from tools.scm.github import GitHubSCMProvider
@@ -19,6 +19,8 @@ def _make_scm(gh: object) -> GitHubSCMProvider:
 
 
 def _repo() -> RepoConfig:
+    # Routes severity=high to the notify tier so resume flows terminate in ``done``
+    # (otherwise the default strict behaviour parks high-severity runs in ``awaiting_approval``).
     return RepoConfig(
         name="demo",
         github_org="acme",
@@ -28,6 +30,7 @@ def _repo() -> RepoConfig:
         notify_on_severity=["high"],
         require_approval_for=["critical"],
         issue_trackers=[],
+        governance=GovernanceConfig(notify=[GovernanceRule(severity=[Severity.high])]),
     )
 
 

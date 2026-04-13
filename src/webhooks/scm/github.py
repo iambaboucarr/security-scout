@@ -1,10 +1,3 @@
-"""GitHub implementation of the WebhookProvider protocol (ADR-027).
-
-Wraps the existing verification helpers from ``webhooks.github`` without
-changing their logic.  The webhook route handler uses this provider instead
-of calling those helpers directly.
-"""
-
 from __future__ import annotations
 
 import hashlib

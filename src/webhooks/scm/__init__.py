@@ -1,4 +1,4 @@
-"""SCM webhook provider abstraction (ADR-027)."""
+"""SCM webhook provider abstraction."""
 
 from webhooks.scm.protocol import WebhookEvent, WebhookProvider
 

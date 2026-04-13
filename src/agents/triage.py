@@ -1,6 +1,6 @@
 """Advisory triage: CVSS, SSVC, dedup, optional LLM refinement.
 
-Tool access (least-privilege, ADR-027):
+Tool access (least-privilege):
     ALLOWED:
         - scm.fetch_advisory          (via SCMProvider)
         - scm.fetch_repository_metadata (via SCMProvider, dependency health)

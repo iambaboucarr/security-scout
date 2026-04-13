@@ -1,4 +1,4 @@
-"""Anthropic-native LLMProvider implementation (ADR-026).
+"""Anthropic-native LLMProvider implementation.
 
 This is the *only* module in the codebase that imports ``anthropic``.
 All other code accesses LLM capabilities through ``LLMProvider``.
