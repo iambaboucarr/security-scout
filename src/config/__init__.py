@@ -121,7 +121,7 @@ class RepoConfig(BaseModel):
     issue_trackers: list[IssueTrackerEntry] = Field(default_factory=list)
     dedup_semantic_search: bool = False
     governance: GovernanceConfig | None = None
-    # Consumed by the interactive Slack approval handler (not yet implemented).
+    # Notified by the interactive Slack approval handler on escalation.
     approvers: list[GovernanceApprover] = Field(default_factory=list)
 
 

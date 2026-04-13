@@ -12,6 +12,7 @@ from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, log_and_persist_config_loaded, session_scope
 from models import Base
 from webhooks import create_github_webhook_router
+from webhooks.slack import create_slack_webhook_router
 
 _LOG = structlog.get_logger(__name__)
 
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Security Scout", lifespan=lifespan)
     app.include_router(create_github_webhook_router())
+    app.include_router(create_slack_webhook_router())
     return app
 
 

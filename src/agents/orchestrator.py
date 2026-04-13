@@ -41,7 +41,13 @@ from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
 from tools.scm.protocol import SCMProvider
-from tools.slack import SlackAPIError, SlackClient, SlackMalformedResponseError, finding_to_report_payload
+from tools.slack import (
+    ApprovalButtonContext,
+    SlackAPIError,
+    SlackClient,
+    SlackMalformedResponseError,
+    finding_to_report_payload,
+)
 
 _LOG = structlog.get_logger(__name__)
 
@@ -505,11 +511,24 @@ async def run_advisory_workflow(
 
     report = finding_to_report_payload(finding)
     try:
-        await slack.send_finding(
-            repo.slack_channel,
-            report,
-            workflow_run_id=run_stable_id,
-        )
+        if tier == GovernanceTier.approve:
+            await slack.send_finding_for_approval(
+                repo.slack_channel,
+                report,
+                workflow_run_id=run_stable_id,
+                approval_context=ApprovalButtonContext(
+                    finding_id=finding.id,
+                    workflow_run_id=run_stable_id,
+                    repo_name=repo.name,
+                ),
+            )
+        else:
+            await slack.send_finding(
+                repo.slack_channel,
+                report,
+                workflow_run_id=run_stable_id,
+                informational=tier == GovernanceTier.notify,
+            )
     except SlackAPIError as e:
         await session.rollback()
         opened = breaker.record_failure("slack")

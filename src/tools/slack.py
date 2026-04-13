@@ -9,13 +9,18 @@ from typing import Any, Literal, NoReturn, Self, cast
 import httpx
 import structlog
 from pydantic import BaseModel, ConfigDict
-from slack_sdk.models.blocks import ContextBlock, DividerBlock, HeaderBlock, SectionBlock
+from slack_sdk.models.blocks import ActionsBlock, ContextBlock, DividerBlock, HeaderBlock, SectionBlock
 from slack_sdk.models.blocks.basic_components import MarkdownTextObject, PlainTextObject
+from slack_sdk.models.blocks.block_elements import ButtonElement
 
 from exceptions import SecurityScoutError
 from models import Finding
 
 __all__ = [
+    "ACTION_ID_APPROVE",
+    "ACTION_ID_ESCALATE",
+    "ACTION_ID_REJECT",
+    "ApprovalButtonContext",
     "DedupMatchInfo",
     "FindingReportPayload",
     "SlackAPIError",
@@ -26,6 +31,10 @@ __all__ = [
     "fallback_notification_text",
     "finding_to_report_payload",
 ]
+
+ACTION_ID_APPROVE = "security_scout:approve"
+ACTION_ID_REJECT = "security_scout:reject"
+ACTION_ID_ESCALATE = "security_scout:escalate"
 
 _LOG = structlog.get_logger(__name__)
 
@@ -134,6 +143,44 @@ class SlackPostMessageResult(BaseModel):
 
     channel: str
     message_ts: str
+
+
+class ApprovalButtonContext(BaseModel):
+    """Encodes the identifiers Slack must echo back from a button click.
+
+    The encoded string is carried as a button ``value`` (Slack caps this at 2000
+    chars, which is plenty for three UUIDs and a repo name).  Slack signs the
+    outer request, so the value is only ever set by us; the approval handler
+    still validates every field against the database before acting on it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    finding_id: uuid.UUID
+    workflow_run_id: uuid.UUID
+    repo_name: str
+
+    def encode(self) -> str:
+        if "|" in self.repo_name:
+            msg = "repo_name must not contain '|'"
+            raise ValueError(msg)
+        return f"{self.finding_id}|{self.workflow_run_id}|{self.repo_name}"
+
+    @classmethod
+    def decode(cls, value: str) -> ApprovalButtonContext:
+        parts = value.split("|")
+        if len(parts) != 3:
+            msg = "expected 3 pipe-separated fields"
+            raise ValueError(msg)
+        fid_raw, run_raw, repo_name = parts
+        if not repo_name:
+            msg = "repo_name is empty"
+            raise ValueError(msg)
+        return cls(
+            finding_id=uuid.UUID(fid_raw),
+            workflow_run_id=uuid.UUID(run_raw),
+            repo_name=repo_name,
+        )
 
 
 def escape_slack_mrkdwn(text: str) -> str:
@@ -259,15 +306,52 @@ def _footer_context_text(
     return f"{ctx} · <{source_link}|source>"
 
 
+def _build_approval_actions_block(ctx: ApprovalButtonContext) -> ActionsBlock:
+    encoded = ctx.encode()
+    return ActionsBlock(
+        block_id="security_scout_actions",
+        elements=[
+            ButtonElement(
+                text=PlainTextObject(text="Approve"),
+                action_id=ACTION_ID_APPROVE,
+                style="primary",
+                value=encoded,
+            ),
+            ButtonElement(
+                text=PlainTextObject(text="Reject"),
+                action_id=ACTION_ID_REJECT,
+                style="danger",
+                value=encoded,
+            ),
+            ButtonElement(
+                text=PlainTextObject(text="Escalate"),
+                action_id=ACTION_ID_ESCALATE,
+                value=encoded,
+            ),
+        ],
+    )
+
+
+def _informational_context_block() -> ContextBlock:
+    return ContextBlock(
+        elements=[MarkdownTextObject(text="_Informational — no action required_")],
+    )
+
+
 def build_finding_blocks(
     report: FindingReportPayload,
     *,
     workflow_run_id: uuid.UUID | None = None,
+    approval_context: ApprovalButtonContext | None = None,
+    informational: bool = False,
 ) -> list[dict[str, Any]]:
     blocks: list[Any] = []
     sev_upper = _plain_single_line(report.severity).upper()
     header_plain = _truncate(f"[{sev_upper}] {_plain_single_line(report.title)}", _MAX_HEADER_CHARS)
     blocks.append(HeaderBlock(text=PlainTextObject(text=header_plain)))
+
+    if informational:
+        blocks.append(_informational_context_block())
 
     blocks.append(DividerBlock())
 
@@ -332,6 +416,9 @@ def build_finding_blocks(
 
     ctx = _footer_context_text(report, source_link, workflow_run_id)
     blocks.append(ContextBlock(elements=[MarkdownTextObject(text=ctx)]))
+
+    if approval_context is not None:
+        blocks.append(_build_approval_actions_block(approval_context))
 
     return [cast(dict[str, Any], b.to_dict()) for b in blocks]
 
@@ -528,12 +615,13 @@ class SlackClient:
         )
         return SlackPostMessageResult(channel=ch, message_ts=ts)
 
-    async def send_finding(
+    async def _post_finding_message(
         self,
         channel: str,
         report: FindingReportPayload,
         *,
-        workflow_run_id: uuid.UUID | None = None,
+        workflow_run_id: uuid.UUID | None,
+        blocks: list[dict[str, Any]],
     ) -> SlackPostMessageResult:
         if not channel:
             msg = "Slack channel is empty"
@@ -543,7 +631,7 @@ class SlackClient:
         body: dict[str, Any] = {
             "channel": channel,
             "text": fallback_notification_text(report),
-            "blocks": build_finding_blocks(report, workflow_run_id=workflow_run_id),
+            "blocks": blocks,
             "unfurl_links": False,
             "unfurl_media": False,
         }
@@ -560,6 +648,113 @@ class SlackClient:
             workflow_run_id=workflow_run_id,
             success_log_event="slack_finding_posted",
             success_metric_name="slack_finding_posted",
+        )
+
+    async def send_finding(
+        self,
+        channel: str,
+        report: FindingReportPayload,
+        *,
+        workflow_run_id: uuid.UUID | None = None,
+        informational: bool = False,
+    ) -> SlackPostMessageResult:
+        blocks = build_finding_blocks(
+            report,
+            workflow_run_id=workflow_run_id,
+            informational=informational,
+        )
+        return await self._post_finding_message(
+            channel,
+            report,
+            workflow_run_id=workflow_run_id,
+            blocks=blocks,
+        )
+
+    async def send_finding_for_approval(
+        self,
+        channel: str,
+        report: FindingReportPayload,
+        *,
+        workflow_run_id: uuid.UUID,
+        approval_context: ApprovalButtonContext,
+    ) -> SlackPostMessageResult:
+        blocks = build_finding_blocks(
+            report,
+            workflow_run_id=workflow_run_id,
+            approval_context=approval_context,
+        )
+        return await self._post_finding_message(
+            channel,
+            report,
+            workflow_run_id=workflow_run_id,
+            blocks=blocks,
+        )
+
+    async def post_thread_reply(
+        self,
+        channel: str,
+        *,
+        thread_ts: str,
+        text: str,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | None = None,
+    ) -> SlackPostMessageResult:
+        if not channel:
+            msg = "Slack channel is empty"
+            raise ValueError(msg)
+        if not thread_ts:
+            msg = "thread_ts is empty"
+            raise ValueError(msg)
+        body: dict[str, Any] = {
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        client = self._client_or_raise()
+        response = await client.post(
+            "/chat.postMessage",
+            json=body,
+            headers=self._auth_headers(),
+        )
+        return self._chat_post_message_response_to_result(
+            response,
+            finding_id=finding_id or "none",
+            workflow_run_id=workflow_run_id,
+            success_log_event="slack_thread_reply_posted",
+            success_metric_name="slack_thread_reply_posted",
+        )
+
+    async def send_dm(
+        self,
+        user_id: str,
+        *,
+        text: str,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | None = None,
+    ) -> SlackPostMessageResult:
+        if not user_id:
+            msg = "Slack user id is empty"
+            raise ValueError(msg)
+        body: dict[str, Any] = {
+            "channel": user_id,
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        client = self._client_or_raise()
+        response = await client.post(
+            "/chat.postMessage",
+            json=body,
+            headers=self._auth_headers(),
+        )
+        return self._chat_post_message_response_to_result(
+            response,
+            finding_id=finding_id or "none",
+            workflow_run_id=workflow_run_id,
+            success_log_event="slack_dm_posted",
+            success_metric_name="slack_dm_posted",
         )
 
     async def notify_workflow_error(

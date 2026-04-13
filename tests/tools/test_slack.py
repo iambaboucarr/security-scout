@@ -9,6 +9,10 @@ import pytest
 
 from models import Finding, FindingStatus, Severity, WorkflowKind
 from tools.slack import (
+    ACTION_ID_APPROVE,
+    ACTION_ID_ESCALATE,
+    ACTION_ID_REJECT,
+    ApprovalButtonContext,
     DedupMatchInfo,
     FindingReportPayload,
     SlackAPIError,
@@ -294,6 +298,129 @@ async def test_send_finding_logs_metric_on_success() -> None:
 def test_slack_client_rejects_empty_token() -> None:
     with pytest.raises(ValueError, match="token"):
         SlackClient("")
+
+
+def test_build_finding_blocks_with_approval_context_adds_three_buttons() -> None:
+    r = _sample_report()
+    ctx = ApprovalButtonContext(
+        finding_id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
+        workflow_run_id=uuid.UUID("66666666-7777-8888-9999-aaaaaaaaaaaa"),
+        repo_name="demo",
+    )
+    blocks = build_finding_blocks(r, approval_context=ctx)
+    actions = [b for b in blocks if b.get("type") == "actions"]
+    assert len(actions) == 1
+    elements = actions[0]["elements"]
+    action_ids = [e["action_id"] for e in elements]
+    assert action_ids == [ACTION_ID_APPROVE, ACTION_ID_REJECT, ACTION_ID_ESCALATE]
+    encoded = ctx.encode()
+    for element in elements:
+        assert element["value"] == encoded
+
+
+def test_build_finding_blocks_without_approval_context_has_no_buttons() -> None:
+    r = _sample_report()
+    blocks = build_finding_blocks(r)
+    assert not any(b.get("type") == "actions" for b in blocks)
+
+
+def test_build_finding_blocks_informational_adds_badge() -> None:
+    r = _sample_report()
+    blocks = build_finding_blocks(r, informational=True)
+    dumped = json.dumps(blocks)
+    assert "Informational" in dumped
+    assert not any(b.get("type") == "actions" for b in blocks)
+
+
+def test_approval_button_context_roundtrip() -> None:
+    ctx = ApprovalButtonContext(
+        finding_id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
+        workflow_run_id=uuid.UUID("66666666-7777-8888-9999-aaaaaaaaaaaa"),
+        repo_name="demo",
+    )
+    restored = ApprovalButtonContext.decode(ctx.encode())
+    assert restored == ctx
+
+
+def test_approval_button_context_rejects_pipe_in_repo_name() -> None:
+    with pytest.raises(ValueError, match="\\|"):
+        ApprovalButtonContext(
+            finding_id=uuid.uuid4(),
+            workflow_run_id=uuid.uuid4(),
+            repo_name="bad|name",
+        ).encode()
+
+
+def test_approval_button_context_decode_rejects_wrong_shape() -> None:
+    with pytest.raises(ValueError, match="3 pipe-separated"):
+        ApprovalButtonContext.decode("only-two|fields")
+
+
+@pytest.mark.asyncio
+async def test_send_finding_for_approval_posts_buttons() -> None:
+    r = _sample_report()
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"ok": True, "channel": "C01234567", "ts": "9.9"})
+
+    async with (
+        httpx.AsyncClient(base_url="https://slack.com/api", transport=httpx.MockTransport(handler)) as client,
+        SlackClient("xoxb-test", client=client) as slack,
+    ):
+        ctx = ApprovalButtonContext(
+            finding_id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
+            workflow_run_id=uuid.UUID("66666666-7777-8888-9999-aaaaaaaaaaaa"),
+            repo_name="demo",
+        )
+        await slack.send_finding_for_approval(
+            "C01234567",
+            r,
+            workflow_run_id=ctx.workflow_run_id,
+            approval_context=ctx,
+        )
+
+    assert len(captured) == 1
+    body = captured[0]
+    blocks = body["blocks"]
+    assert any(b.get("type") == "actions" for b in blocks)  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_post_thread_reply_sends_thread_ts() -> None:
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"ok": True, "channel": "C01", "ts": "2.0"})
+
+    async with (
+        httpx.AsyncClient(base_url="https://slack.com/api", transport=httpx.MockTransport(handler)) as client,
+        SlackClient("xoxb-test", client=client) as slack,
+    ):
+        await slack.post_thread_reply("C01", thread_ts="1.0", text="hi")
+
+    assert captured[0]["thread_ts"] == "1.0"
+    assert captured[0]["text"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_send_dm_uses_user_id_as_channel() -> None:
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"ok": True, "channel": "D01", "ts": "3.0"})
+
+    async with (
+        httpx.AsyncClient(base_url="https://slack.com/api", transport=httpx.MockTransport(handler)) as client,
+        SlackClient("xoxb-test", client=client) as slack,
+    ):
+        await slack.send_dm("U123456", text="escalated")
+
+    assert captured[0]["channel"] == "U123456"
+    assert captured[0]["text"] == "escalated"
 
 
 @pytest.mark.asyncio
