@@ -40,6 +40,7 @@ from config import RepoConfig
 from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
+from tools.issue_tracker import IssueTrackerCredentials
 from tools.rate_limiter import RateLimiterCircuitOpen, RateLimitExceeded, SlidingWindowRateLimiter
 from tools.scm.protocol import SCMProvider
 from tools.slack import (
@@ -154,6 +155,7 @@ async def run_advisory_workflow(
     schedule_retry: Callable[[ScheduleRetryParams], Awaitable[None]] | None = None,
     resume_workflow_run_id: uuid.UUID | None = None,
     rate_limiter: SlidingWindowRateLimiter | None = None,
+    tracker_credentials: IssueTrackerCredentials | None = None,
 ) -> WorkflowRun:
     """Run or resume the advisory triage → Slack report workflow.
 
@@ -277,6 +279,7 @@ async def run_advisory_workflow(
                 workflow_run_id=run_stable_id,
                 llm=llm,
                 reasoning_model=reasoning_model,
+                tracker_credentials=tracker_credentials,
             )
         except SecurityScoutError as e:
             await session.rollback()

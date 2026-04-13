@@ -18,7 +18,16 @@ repos:
       - type: github_issues
         security_label: security
         search_closed: true
+      # JIRA Cloud / Server (auth via JIRA_API_TOKEN env var; JIRA_API_EMAIL for Cloud Basic auth):
+      # - type: jira
+      #   project_key: SEC
+      #   base_url: https://acme.atlassian.net
+      # Linear (auth via LINEAR_API_KEY env var):
+      # - type: linear
+      #   team_id: SECURITY
+      #   label_name: security
     dedup_semantic_search: false
+    accepted_risk_ttl_days: 90    # 0 = never expire
     # Tiered governance. Omit this block entirely to keep strict approval for every
     # finding above `informational`. Precedence: approve > notify > auto_resolve.
     # governance:

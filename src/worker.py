@@ -13,6 +13,7 @@ from ai.anthropic_provider import create_provider
 from ai.provider import LLMProvider
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, session_scope
+from tools.issue_tracker import IssueTrackerCredentials
 from tools.rate_limiter import SlidingWindowRateLimiter
 from tools.scm.github import GitHubSCMProvider
 from tools.slack import SlackClient
@@ -84,6 +85,12 @@ async def process_advisory_workflow_job(
             resume_workflow_run_id=str(params.workflow_run_id),
         )
 
+    tracker_credentials = IssueTrackerCredentials(
+        jira_email=settings.jira_api_email,
+        jira_api_token=settings.jira_api_token,
+        linear_api_key=settings.linear_api_key,
+    )
+
     async with (
         GitHubSCMProvider(settings.github_pat) as scm,
         SlackClient(settings.slack_bot_token) as slack,
@@ -103,6 +110,7 @@ async def process_advisory_workflow_job(
             schedule_retry=schedule_retry,
             resume_workflow_run_id=resume_uuid,
             rate_limiter=rate_limiter,
+            tracker_credentials=tracker_credentials,
         )
 
 

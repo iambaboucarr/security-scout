@@ -141,3 +141,28 @@ def test_parse_interactive_payload_rejects_non_block_actions() -> None:
 def test_parse_interactive_payload_requires_payload_field() -> None:
     with pytest.raises(SlackVerificationError, match="missing payload"):
         parse_interactive_payload(b"other=thing")
+
+
+@pytest.mark.parametrize(
+    "action_id",
+    [
+        "security_scout:dedup_confirm",
+        "security_scout:dedup_new_instance",
+        "security_scout:dedup_reopen",
+        "security_scout:dedup_resolved",
+        "security_scout:risk_still_accepted",
+        "security_scout:risk_reevaluate",
+    ],
+)
+def test_parse_interactive_payload_decodes_dedup_actions(action_id: str) -> None:
+    value = _encoded_button_value()
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U01ABC"},
+        "container": {"message_ts": "1.0", "channel_id": "C1"},
+        "actions": [{"action_id": action_id, "value": value, "type": "button"}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    out = parse_interactive_payload(body)
+    assert out.action.value == action_id
+    assert out.button_value == value
