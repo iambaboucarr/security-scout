@@ -26,6 +26,7 @@ dependencies = [
     "docker>=7.1",
     "structlog>=24.4",
     "pyyaml>=6.0",
+    "fastmcp>=2.0",
 ]
 
 [dependency-groups]
@@ -62,6 +63,7 @@ packages = ["src/agents", "src/tools", "src/webhooks", "src/config", "src/ai"]
 "src/exceptions.py" = "exceptions.py"
 "src/main.py" = "main.py"
 "src/worker.py" = "worker.py"
+"src/mcp_readonly.py" = "mcp_readonly.py"
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 
@@ -96,7 +98,7 @@ ignore = [
 "tests/**" = ["T20", "ARG", "S"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agents", "tools", "webhooks", "models", "db", "exceptions", "config", "worker", "mcp_server", "ai"]
+known-first-party = ["agents", "tools", "webhooks", "models", "db", "exceptions", "config", "worker", "mcp_server", "mcp_readonly", "ai"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "typing.Optional".msg = "Use X | None (PEP 604)"

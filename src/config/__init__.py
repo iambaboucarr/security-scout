@@ -182,6 +182,9 @@ class Settings(BaseSettings):
     alert_error_rate_window_minutes: int = 60
     alert_latency_p95_seconds: float = 60.0
 
+    # MCP read-only server
+    mcp_client_allowlist: list[str] = Field(default_factory=list)
+
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
