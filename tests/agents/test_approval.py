@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import structlog.testing
 from sqlalchemy import select
 
 from agents.approval import ApprovalContext, ApprovalOutcome, handle_slack_approval
@@ -23,6 +24,8 @@ from models import (
     FindingStatus,
     Severity,
     SSVCAction,
+    TriageAccuracy,
+    TriageDecision,
     WorkflowKind,
     WorkflowRun,
 )
@@ -49,14 +52,20 @@ def _app_config(*, approvers: list[GovernanceApprover] | None = None) -> AppConf
     )
 
 
-async def _seed_awaiting_approval(session) -> tuple[Finding, WorkflowRun]:
+async def _seed_awaiting_approval(
+    session,
+    *,
+    ssvc_action: SSVCAction | None = SSVCAction.act,
+    triage_confidence: float | None = 0.75,
+) -> tuple[Finding, WorkflowRun]:
     finding = Finding(
         workflow=WorkflowKind.advisory,
         source_ref="https://github.com/acme/app/security/advisories/GHSA-TEST",
         severity=Severity.high,
-        ssvc_action=SSVCAction.act,
+        ssvc_action=ssvc_action,
         status=FindingStatus.unconfirmed,
         title="Sample advisory",
+        triage_confidence=triage_confidence,
     )
     session.add(finding)
     await session.flush()
@@ -362,3 +371,220 @@ async def test_unknown_repo_returns_already_resolved(db_session) -> None:
         )
 
     assert outcome == ApprovalOutcome.already_resolved
+
+
+async def _fetch_accuracy(session, finding_id: uuid.UUID) -> list[TriageAccuracy]:
+    result = await session.execute(select(TriageAccuracy).where(TriageAccuracy.finding_id == finding_id))
+    return list(result.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_approve_records_triage_accuracy_with_positive_outcome_signal(db_session) -> None:
+    finding, run = await _seed_awaiting_approval(db_session)
+    await db_session.commit()
+    app_config = _app_config()
+    ctx = ApprovalContext(finding_id=finding.id, workflow_run_id=run.id, repo_name="demo")
+
+    http, _ = _httpx_and_transport()
+    async with http, SlackClient("xoxb-t", client=http) as slack:
+        await handle_slack_approval(
+            db_session,
+            app_config,
+            slack,
+            ctx=ctx,
+            action=SlackActionId.approve,
+            user_id="U01APPROVER",
+            channel_id="C1",
+            message_ts="1.0",
+        )
+
+    rows = await _fetch_accuracy(db_session, finding.id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.human_decision == TriageDecision.approved
+    assert row.outcome_signal == 1.0
+    assert row.predicted_ssvc_action == SSVCAction.act
+    assert row.predicted_confidence == 0.75
+    assert row.slack_user_id == "U01APPROVER"
+    assert row.workflow_run_id == run.id
+
+
+@pytest.mark.asyncio
+async def test_reject_records_negative_outcome_signal(db_session) -> None:
+    finding, run = await _seed_awaiting_approval(db_session)
+    await db_session.commit()
+    app_config = _app_config()
+    ctx = ApprovalContext(finding_id=finding.id, workflow_run_id=run.id, repo_name="demo")
+
+    http, _ = _httpx_and_transport()
+    async with http, SlackClient("xoxb-t", client=http) as slack:
+        await handle_slack_approval(
+            db_session,
+            app_config,
+            slack,
+            ctx=ctx,
+            action=SlackActionId.reject,
+            user_id="U02REJECT",
+            channel_id="C1",
+            message_ts="1.0",
+        )
+
+    rows = await _fetch_accuracy(db_session, finding.id)
+    assert len(rows) == 1
+    assert rows[0].human_decision == TriageDecision.rejected
+    assert rows[0].outcome_signal == -1.0
+
+
+@pytest.mark.asyncio
+async def test_escalate_records_zero_outcome_signal(db_session) -> None:
+    finding, run = await _seed_awaiting_approval(
+        db_session,
+        ssvc_action=SSVCAction.immediate,
+        triage_confidence=0.9,
+    )
+    await db_session.commit()
+    app_config = _app_config(approvers=[GovernanceApprover(slack_user="U0APPROVER1")])
+    ctx = ApprovalContext(finding_id=finding.id, workflow_run_id=run.id, repo_name="demo")
+
+    http, _ = _httpx_and_transport()
+    async with http, SlackClient("xoxb-t", client=http) as slack:
+        await handle_slack_approval(
+            db_session,
+            app_config,
+            slack,
+            ctx=ctx,
+            action=SlackActionId.escalate,
+            user_id="U0REPORTER",
+            channel_id="C1",
+            message_ts="1.0",
+        )
+
+    rows = await _fetch_accuracy(db_session, finding.id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.human_decision == TriageDecision.escalated
+    assert row.outcome_signal == 0.0
+    assert row.predicted_ssvc_action == SSVCAction.immediate
+    assert row.predicted_confidence == 0.9
+
+
+@pytest.mark.asyncio
+async def test_triage_accuracy_delta_metric_emitted(db_session) -> None:
+    finding, run = await _seed_awaiting_approval(db_session)
+    await db_session.commit()
+    app_config = _app_config()
+    ctx = ApprovalContext(finding_id=finding.id, workflow_run_id=run.id, repo_name="demo")
+
+    http, _ = _httpx_and_transport()
+    with structlog.testing.capture_logs() as captured:
+        async with http, SlackClient("xoxb-t", client=http) as slack:
+            await handle_slack_approval(
+                db_session,
+                app_config,
+                slack,
+                ctx=ctx,
+                action=SlackActionId.reject,
+                user_id="U02REJECT",
+                channel_id="C1",
+                message_ts="1.0",
+            )
+
+    metric_events = [e for e in captured if e.get("metric_name") == "triage_accuracy_delta"]
+    assert len(metric_events) == 1
+    evt = metric_events[0]
+    assert evt["value"] == -1.0
+    assert evt["human_decision"] == TriageDecision.rejected.value
+    assert evt["predicted_ssvc_action"] == SSVCAction.act.value
+    assert evt["predicted_confidence"] == 0.75
+
+
+@pytest.mark.asyncio
+async def test_accuracy_not_recorded_on_already_resolved(db_session) -> None:
+    finding, run = await _seed_awaiting_approval(db_session)
+    run.state = AdvisoryWorkflowState.done.value
+    finding.approved_by = "U0PRIOR"
+    await db_session.commit()
+    app_config = _app_config()
+    ctx = ApprovalContext(finding_id=finding.id, workflow_run_id=run.id, repo_name="demo")
+
+    http, _ = _httpx_and_transport()
+    async with http, SlackClient("xoxb-t", client=http) as slack:
+        await handle_slack_approval(
+            db_session,
+            app_config,
+            slack,
+            ctx=ctx,
+            action=SlackActionId.approve,
+            user_id="U01",
+            channel_id="C1",
+            message_ts="1.0",
+        )
+
+    rows = await _fetch_accuracy(db_session, finding.id)
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_accuracy_records_null_prediction_fields(db_session) -> None:
+    finding, run = await _seed_awaiting_approval(
+        db_session,
+        ssvc_action=None,
+        triage_confidence=None,
+    )
+    await db_session.commit()
+    app_config = _app_config()
+    ctx = ApprovalContext(finding_id=finding.id, workflow_run_id=run.id, repo_name="demo")
+
+    http, _ = _httpx_and_transport()
+    async with http, SlackClient("xoxb-t", client=http) as slack:
+        await handle_slack_approval(
+            db_session,
+            app_config,
+            slack,
+            ctx=ctx,
+            action=SlackActionId.approve,
+            user_id="U01",
+            channel_id="C1",
+            message_ts="1.0",
+        )
+
+    rows = await _fetch_accuracy(db_session, finding.id)
+    assert len(rows) == 1
+    assert rows[0].predicted_ssvc_action is None
+    assert rows[0].predicted_confidence is None
+    assert rows[0].outcome_signal == 1.0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_escalation_does_not_insert_second_accuracy_row(db_session) -> None:
+    finding, run = await _seed_awaiting_approval(db_session)
+    await db_session.commit()
+    app_config = _app_config(approvers=[GovernanceApprover(slack_user="U0APPROVER1")])
+    ctx = ApprovalContext(finding_id=finding.id, workflow_run_id=run.id, repo_name="demo")
+
+    http, _ = _httpx_and_transport()
+    async with http, SlackClient("xoxb-t", client=http) as slack:
+        await handle_slack_approval(
+            db_session,
+            app_config,
+            slack,
+            ctx=ctx,
+            action=SlackActionId.escalate,
+            user_id="U0REPORTER",
+            channel_id="C1",
+            message_ts="1.0",
+        )
+        await handle_slack_approval(
+            db_session,
+            app_config,
+            slack,
+            ctx=ctx,
+            action=SlackActionId.escalate,
+            user_id="U0REPORTER",
+            channel_id="C1",
+            message_ts="1.0",
+        )
+
+    rows = await _fetch_accuracy(db_session, finding.id)
+    assert len(rows) == 1
+    assert rows[0].human_decision == TriageDecision.escalated

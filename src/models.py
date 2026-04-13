@@ -118,6 +118,56 @@ class WorkflowRun(Base):
     action_logs: Mapped[list[AgentActionLog]] = relationship(back_populates="workflow_run")
 
 
+class TriageDecision(StrEnum):
+    approved = "approved"
+    rejected = "rejected"
+    escalated = "escalated"
+
+
+class TriageAccuracy(Base):
+    """Records the agent's triage prediction vs. the human's approval decision.
+
+    ``outcome_signal`` is a coarse directional indicator: +1.0 (approved, agent
+    prediction accepted), -1.0 (rejected, agent prediction overruled), 0.0
+    (escalated, decision deferred).  It is **not** a computed distance between
+    prediction and decision — richer retrospective analysis should use the raw
+    ``predicted_ssvc_action`` and ``predicted_confidence`` columns alongside the
+    ``human_decision`` enum.
+    """
+
+    __tablename__ = "triage_accuracy"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    finding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("findings.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    workflow_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    predicted_ssvc_action: Mapped[SSVCAction | None] = mapped_column(
+        Enum(SSVCAction, native_enum=False, length=32),
+        nullable=True,
+    )
+    predicted_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    human_decision: Mapped[TriageDecision] = mapped_column(
+        Enum(TriageDecision, native_enum=False, length=32),
+        nullable=False,
+    )
+    outcome_signal: Mapped[float] = mapped_column(Float, nullable=False)
+    slack_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class AgentActionLog(Base):
     __tablename__ = "agent_action_logs"
 

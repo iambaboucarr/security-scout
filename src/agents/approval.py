@@ -16,11 +16,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.orchestrator import AdvisoryWorkflowState
 from config import AppConfig, RepoConfig
-from models import AgentActionLog, Finding, FindingStatus, WorkflowRun
+from models import AgentActionLog, Finding, FindingStatus, TriageAccuracy, TriageDecision, WorkflowRun
 from tools.slack import (
     ApprovalButtonContext,
     SlackAPIError,
@@ -204,6 +205,8 @@ async def handle_slack_approval(
             run.state = AdvisoryWorkflowState.done.value
             run.completed_at = now
             outcome = ApprovalOutcome.approved
+            decision = TriageDecision.approved
+            outcome_signal = 1.0
             confirmation = f"Approved by <@{user_id}>."
         case SlackActionId.reject:
             finding.approved_by = user_id
@@ -212,13 +215,54 @@ async def handle_slack_approval(
             run.state = AdvisoryWorkflowState.done.value
             run.completed_at = now
             outcome = ApprovalOutcome.rejected
+            decision = TriageDecision.rejected
+            outcome_signal = -1.0
             confirmation = f"Rejected by <@{user_id}> (marked false positive)."
         case SlackActionId.escalate:
             outcome = ApprovalOutcome.escalated
+            decision = TriageDecision.escalated
+            outcome_signal = 0.0
             confirmation = f"Escalated by <@{user_id}>."
         case _:
             msg = f"unhandled approval action: {action}"
             raise ValueError(msg)
+
+    if decision == TriageDecision.escalated:
+        existing = (
+            await session.execute(
+                select(TriageAccuracy.id).where(
+                    TriageAccuracy.finding_id == finding.id,
+                    TriageAccuracy.slack_user_id == user_id,
+                    TriageAccuracy.human_decision == TriageDecision.escalated,
+                )
+            )
+        ).first()
+        is_duplicate_escalation = existing is not None
+    else:
+        is_duplicate_escalation = False
+
+    if not is_duplicate_escalation:
+        session.add(
+            TriageAccuracy(
+                finding_id=finding.id,
+                workflow_run_id=run.id,
+                predicted_ssvc_action=finding.ssvc_action,
+                predicted_confidence=finding.triage_confidence,
+                human_decision=decision,
+                outcome_signal=outcome_signal,
+                slack_user_id=user_id,
+            )
+        )
+        await session.flush()
+
+        log.info(
+            "triage_accuracy_recorded",
+            metric_name="triage_accuracy_delta",
+            value=outcome_signal,
+            predicted_ssvc_action=finding.ssvc_action.value if finding.ssvc_action is not None else None,
+            predicted_confidence=finding.triage_confidence,
+            human_decision=decision.value,
+        )
 
     await _append_action_log(
         session,
