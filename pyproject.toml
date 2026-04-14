@@ -96,6 +96,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["T20", "ARG", "S"]
+"scripts/**" = ["T20", "S"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["agents", "tools", "webhooks", "models", "db", "exceptions", "config", "worker", "mcp_server", "mcp_readonly", "ai"]
