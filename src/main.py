@@ -7,6 +7,8 @@ import structlog
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, log_and_persist_config_loaded, session_scope
@@ -70,6 +72,14 @@ def create_app() -> FastAPI:
         _LOG.info("app_shutdown_complete", metric_name="app_shutdown_complete")
 
     app = FastAPI(title="Security Scout", lifespan=lifespan)
+
+    if settings.trusted_hosts != ["*"]:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+
+    @app.get("/healthz")
+    async def healthz() -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
     app.include_router(create_github_webhook_router())
     app.include_router(create_slack_webhook_router())
     return app

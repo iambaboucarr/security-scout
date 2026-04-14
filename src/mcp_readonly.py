@@ -144,6 +144,12 @@ def _sanitize_optional(text: str | None, *, max_chars: int = 2000) -> str | None
     return sanitize_text(text, max_chars=max_chars)
 
 
+def _sanitize_evidence(evidence: dict[str, Any] | None) -> dict[str, Any] | None:
+    if evidence is None:
+        return None
+    return {k: sanitize_text(v, max_chars=2000) if isinstance(v, str) else v for k, v in evidence.items()}
+
+
 def _parse_finding_id(raw: str) -> uuid.UUID:
     try:
         return uuid.UUID(raw)
@@ -296,7 +302,7 @@ def create_mcp_server(
             duplicate_of=row.duplicate_of,
             duplicate_url=row.duplicate_url,
             reproduction=_sanitize_optional(row.reproduction),
-            evidence=row.evidence,
+            evidence=_sanitize_evidence(row.evidence),
             approved_by=row.approved_by,
             approved_at=row.approved_at,
             created_at=row.created_at,

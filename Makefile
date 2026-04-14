@@ -1,6 +1,3 @@
-# Security Scout — task runner (ADR-025). Run from repository root so `.env` and `repos.yaml` resolve.
-# Requires: uv, Docker (for Redis via `make services`).
-
 .PHONY: help install format lint typecheck test testcov testslow check all clean \
 	services services-down run worker migrate db-upgrade
 
