@@ -8,7 +8,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from config import AppConfig, RepoConfig, Settings
-from webhooks.scm.github import GitHubWebhookProvider
+from webhooks.scm.github import DeliveryIdStore, GitHubWebhookProvider, RedisDeliveryIdStore
 from webhooks.scm.protocol import WebhookEvent, WebhookVerificationError
 
 _LOG = structlog.get_logger(__name__)
@@ -139,12 +139,24 @@ async def github_webhook(request: Request) -> Response:
         _WEBHOOK_PROVIDER.verify_signature(raw, headers, settings.github_webhook_secret)
         _WEBHOOK_PROVIDER.assert_delivery_fresh(headers, now=datetime.now(UTC))
     except WebhookVerificationError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        _LOG.warning("github_webhook_verification_failed", reason=str(exc))
+        raise HTTPException(status_code=401, detail="unauthorized") from exc
+
+    delivery_store: DeliveryIdStore | None = None
+    redis_pool = getattr(request.app.state, "redis_pool", None)
+    if redis_pool is not None:
+        delivery_store = RedisDeliveryIdStore(redis_pool)
+    try:
+        await _WEBHOOK_PROVIDER.assert_not_replayed(headers, delivery_store)
+    except WebhookVerificationError as exc:
+        _LOG.warning("github_webhook_replay_rejected", reason=str(exc))
+        raise HTTPException(status_code=401, detail="unauthorized") from exc
 
     try:
         webhook_event = _WEBHOOK_PROVIDER.parse_event(raw, headers)
     except WebhookVerificationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _LOG.warning("github_webhook_parse_failed", reason=str(exc))
+        raise HTTPException(status_code=400, detail="bad request") from exc
 
     log = _LOG.bind(
         github_event=webhook_event.event_type,

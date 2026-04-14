@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import structlog
 
@@ -16,6 +16,16 @@ _LOG = structlog.get_logger(__name__)
 
 _REPLAY_WINDOW_SEC = 300
 _MAX_FUTURE_SKEW_SEC = 60
+_DELIVERY_ID_TTL_SEC = 600
+
+
+@runtime_checkable
+class DeliveryIdStore(Protocol):
+    """Interface for checking whether a webhook delivery ID has been seen."""
+
+    async def is_duplicate(self, delivery_id: str) -> bool:
+        """Return True if *delivery_id* was already processed. Mark it as seen."""
+        ...
 
 
 class GitHubWebhookProvider:
@@ -44,7 +54,7 @@ class GitHubWebhookProvider:
     ) -> None:
         date_header = headers.get("date") or headers.get("Date")
         if not date_header:
-            _LOG.info(
+            _LOG.warning(
                 "webhook_delivery_date_freshness_skipped",
                 metric_name="webhook_delivery_date_freshness_skipped",
                 reason="no_http_date_header",
@@ -61,6 +71,32 @@ class GitHubWebhookProvider:
             raise WebhookVerificationError("webhook Date too far in the future")
         if skew > replay_window_sec:
             raise WebhookVerificationError("stale webhook delivery")
+
+    async def assert_not_replayed(
+        self,
+        headers: Mapping[str, str],
+        store: DeliveryIdStore | None,
+    ) -> None:
+        """Reject duplicate deliveries via ``X-GitHub-Delivery`` idempotency key.
+
+        Falls back to a warning log if no *store* is provided (e.g. Redis unavailable).
+        """
+        delivery_id = (headers.get("x-github-delivery") or headers.get("X-GitHub-Delivery") or "").strip()
+        if not delivery_id:
+            _LOG.warning(
+                "webhook_delivery_id_missing",
+                metric_name="webhook_delivery_id_missing",
+            )
+            return
+        if store is None:
+            return
+        try:
+            is_dup = await store.is_duplicate(delivery_id)
+        except Exception:
+            _LOG.warning("webhook_delivery_id_store_error", delivery_id=delivery_id, exc_info=True)
+            return
+        if is_dup:
+            raise WebhookVerificationError("duplicate webhook delivery")
 
     def parse_event(
         self,
@@ -111,4 +147,23 @@ def _owner_repo_from_repository_dict(repo_obj: dict[str, Any]) -> tuple[str | No
     return None, None
 
 
-__all__ = ["GitHubWebhookProvider"]
+class RedisDeliveryIdStore:
+    """Redis-backed ``DeliveryIdStore`` using SET NX with TTL for idempotency."""
+
+    _PREFIX = "wh:delivery:"
+
+    def __init__(self, redis: Any, *, ttl_seconds: int = _DELIVERY_ID_TTL_SEC) -> None:
+        self._redis = redis
+        self._ttl = ttl_seconds
+
+    async def is_duplicate(self, delivery_id: str) -> bool:
+        was_set = await self._redis.set(
+            f"{self._PREFIX}{delivery_id}",
+            "1",
+            nx=True,
+            ex=self._ttl,
+        )
+        return was_set is None
+
+
+__all__ = ["DeliveryIdStore", "GitHubWebhookProvider", "RedisDeliveryIdStore"]

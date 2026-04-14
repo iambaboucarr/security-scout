@@ -152,6 +152,16 @@ def _env_file_path() -> Path | None:
     return p if p.is_file() else None
 
 
+_DEV_PLACEHOLDER_SECRETS: frozenset[str] = frozenset(
+    {
+        "dev-local-github-webhook-secret",
+        "dev-local-github-pat",
+        "xoxb-dev-local-placeholder",
+        "dev-local-slack-signing-secret",
+    }
+)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_env_file_path(),
@@ -192,8 +202,29 @@ class Settings(BaseSettings):
     alert_error_rate_window_minutes: int = 60
     alert_latency_p95_seconds: float = 60.0
 
+    # Host header validation (defence-in-depth behind reverse proxy)
+    trusted_hosts: list[str] = Field(default_factory=lambda: ["*"])
+
     # MCP read-only server
     mcp_client_allowlist: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _reject_dev_placeholders_in_production(self) -> Self:
+        if self.database_url.startswith("sqlite"):
+            return self
+        offending = [
+            name
+            for name in ("github_webhook_secret", "github_pat", "slack_bot_token", "slack_signing_secret")
+            if getattr(self, name) in _DEV_PLACEHOLDER_SECRETS
+        ]
+        if offending:
+            msg = (
+                f"Production database detected ({self.database_url.split('@')[-1] if '@' in self.database_url else '...'}) "
+                f"but the following secrets still have dev placeholder values: {', '.join(offending)}. "
+                "Set real values in .env or environment variables before deploying."
+            )
+            raise ValueError(msg)
+        return self
 
 
 @dataclass(frozen=True, slots=True)

@@ -211,7 +211,8 @@ async def slack_webhook(request: Request) -> Response:
     try:
         payload = parse_interactive_payload(raw)
     except SlackVerificationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _LOG.warning("slack_webhook_parse_failed", reason=str(exc))
+        raise HTTPException(status_code=400, detail="bad request") from exc
 
     log = _LOG.bind(
         slack_action=payload.action.value,
@@ -226,7 +227,7 @@ async def slack_webhook(request: Request) -> Response:
             ctx = ApprovalContext.from_button_value(payload.button_value)
     except ValueError as exc:
         log.warning("slack_webhook_bad_value", err=str(exc))
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail="bad request") from exc
 
     async with (
         SlackClient(settings.slack_bot_token) as slack,
