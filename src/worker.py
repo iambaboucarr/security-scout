@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import Any, ClassVar, Literal
+from collections.abc import Sequence
+from typing import Any, Literal
 
 import httpx
 import structlog
 from arq.connections import RedisSettings
+from arq.typing import StartupShutdown, WorkerSettingsBase
 
 from agents.orchestrator import ScheduleRetryParams, run_advisory_workflow
 from ai.anthropic_provider import create_provider
@@ -21,7 +23,7 @@ from tools.slack import SlackClient
 _LOG = structlog.get_logger(__name__)
 
 
-async def startup(ctx: dict[str, Any]) -> None:
+async def startup(ctx: dict[Any, Any]) -> None:
     settings = Settings()
     configure_logging(settings.log_level)
     app_config = load_app_config(settings)
@@ -37,7 +39,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     ctx["rate_limiter"] = SlidingWindowRateLimiter(redis) if redis is not None else None
 
 
-async def shutdown(ctx: dict[str, Any]) -> None:
+async def shutdown(ctx: dict[Any, Any]) -> None:
     await ctx["http_client"].aclose()
     llm = ctx.get("llm")
     if llm is not None:
@@ -114,9 +116,9 @@ async def process_advisory_workflow_job(
         )
 
 
-class WorkerSettings:
+class WorkerSettings(WorkerSettingsBase):
     # Use REDIS_URL env (same as Settings.redis_url) so importing this module does not require all app secrets.
     redis_settings = RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://localhost:6379"))
-    on_startup = startup
-    on_shutdown = shutdown
-    functions: ClassVar[list[Any]] = [process_advisory_workflow_job]
+    on_startup: StartupShutdown | None = startup
+    on_shutdown: StartupShutdown | None = shutdown
+    functions: Sequence[Any] = [process_advisory_workflow_job]

@@ -15,7 +15,7 @@ from worker import WorkerSettings
 
 def main() -> None:
     asyncio.set_event_loop(asyncio.new_event_loop())
-    run_worker(WorkerSettings)  # type: ignore[arg-type]  # ARQ type stubs expect WorkerSettingsBase
+    run_worker(WorkerSettings)
 
 
 if __name__ == "__main__":
