@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Shared Redis sliding window rate limiter with per-scope circuit breaker.
 
 Uses Redis sorted sets for sliding window counting and a Lua script for

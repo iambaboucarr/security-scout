@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Slack interactive component webhook.
 
 Mirrors the three-requirement verification used for GitHub webhooks:

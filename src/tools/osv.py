@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """OSV.dev queries for supply-chain context.
 
 IDs returned include historical CVEs for the package; callers should not treat

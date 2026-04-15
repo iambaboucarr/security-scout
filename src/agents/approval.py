@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Interactive approval handler.
 
 Owns the ``awaiting_approval → done`` transition of the advisory workflow. Invoked

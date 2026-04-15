@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tools.rate_limiter — sliding window rate limiter with circuit breaker."""
 
 from __future__ import annotations

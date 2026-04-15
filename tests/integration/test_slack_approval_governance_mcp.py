@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Integration tests for three cross-cutting flows with real SQLite:
 
 1. Slack button click → approval handler → DB update → thread reply

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Advisory triage: CVSS, SSVC, dedup, optional LLM refinement.
 
 Tool access (least-privilege):

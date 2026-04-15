@@ -1,6 +1,14 @@
 # Contributing
 
-Thank you for helping with Security Scout. This document describes **commit messages** and **pre-merge checks**. For architecture and coding rules, see `CLAUDE.md` and `docs/`.
+Thank you for helping with Security Scout. This document covers **licensing**, **commit messages**, and **pre-merge checks**. For architecture and coding rules, see `CLAUDE.md` and `docs/`.
+
+## Licensing your contribution
+
+Security Scout is licensed under the [Apache License 2.0](LICENSE). By submitting a pull request or patch, you agree that your contribution is licensed under the same terms (Apache License 2.0, Section 5 — inbound = outbound). No separate Contributor License Agreement (CLA) is required.
+
+If your employer has intellectual property policies, please ensure you have permission to contribute before submitting.
+
+We recommend (but do not yet require) signing off your commits with the [Developer Certificate of Origin](https://developercertificate.org/) (`git commit -s`) to certify you have the right to submit the contribution.
 
 ## Commit messages (Conventional Commits)
 

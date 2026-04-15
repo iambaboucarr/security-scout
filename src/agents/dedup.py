@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Interactive deduplication and accepted-risk decision handler.
 
 Owns the human resolution of dedup matches surfaced in the Slack finding message.

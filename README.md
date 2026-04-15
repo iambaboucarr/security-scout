@@ -49,4 +49,4 @@ documentation/
 
 ## License
 
-MIT
+[Apache License 2.0](LICENSE) — see [NOTICE](NOTICE) for attribution.

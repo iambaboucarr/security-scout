@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Governance routing: maps a triaged finding to an auto_resolve / notify / approve tier.
 
 Pure logic, no I/O. Precedence is approve > notify > auto_resolve (most restrictive wins) so

@@ -7,7 +7,8 @@ name = "security-scout"
 dynamic = ["version"]
 requires-python = ">=3.14"
 description = "General-purpose security agent for vulnerability triage and validation"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "anthropic>=0.52",
     "fastapi>=0.115",

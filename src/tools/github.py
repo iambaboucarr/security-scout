@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """GitHub REST read API: advisories, PR metadata, repo metadata.
 
 Uses ``httpx`` (async I/O). PyGitHub is synchronous-only and unused here. Writes must

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """SCM provider abstraction.
 
 Agents import from this package, not from ``tools.github`` directly.

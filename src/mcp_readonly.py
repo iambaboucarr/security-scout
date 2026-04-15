@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Read-only MCP server exposing finding and dependency queries.
 
 Exposes four tools to MCP clients (Claude Code, Cursor, etc.):

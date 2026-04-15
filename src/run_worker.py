@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Wrapper to run the ARQ worker on Python 3.14+.
 
 arq 0.27 calls asyncio.get_event_loop() during __init__ which raises on

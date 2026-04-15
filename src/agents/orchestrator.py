@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Orchestrator agent: event routing + advisory workflow state machine.
 
 Tool access (least-privilege):

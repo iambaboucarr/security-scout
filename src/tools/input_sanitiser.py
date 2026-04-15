@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Semantic firewall: sanitise untrusted strings before LLM prompts.
 
 Regex-based redaction targets common jailbreak phrasing; it may also alter benign vendor
