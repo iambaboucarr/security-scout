@@ -1681,14 +1681,14 @@ requires-dist = [
     { name = "pygithub", specifier = ">=2.5" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "slack-bolt", specifier = ">=1.21" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.49" },
     { name = "structlog", specifier = ">=24.4" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.44.0" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "coverage", extras = ["toml"], specifier = ">=7.6" },
+    { name = "coverage", extras = ["toml"], specifier = ">=7.13.5" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pre-commit", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=8.3" },
