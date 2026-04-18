@@ -17,7 +17,8 @@ _LOG = structlog.get_logger(__name__)
 
 _REPLAY_WINDOW_SEC = 300
 _MAX_FUTURE_SKEW_SEC = 60
-_DELIVERY_ID_TTL_SEC = 600
+# 24 hours. Covers GitHub manual redelivery, which reuses X-GitHub-Delivery.
+_DELIVERY_ID_TTL_SEC = 86_400
 
 
 @runtime_checkable

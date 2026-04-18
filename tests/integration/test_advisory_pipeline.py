@@ -19,6 +19,8 @@ from db import session_scope
 from models import Finding, WorkflowKind, WorkflowRun
 from worker import process_advisory_workflow_job
 
+pytestmark = pytest.mark.integration
+
 _GHSA = "GHSA-XXXX-YYYY-ZZZZ"
 _ADVISORY_JSON: dict[str, Any] = {
     "ghsa_id": _GHSA,

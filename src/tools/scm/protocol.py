@@ -37,6 +37,18 @@ class SCMProvider(Protocol):
         workflow_run_id: uuid.UUID | str | None = None,
     ) -> AdvisoryData: ...
 
+    async def list_advisories(
+        self,
+        repo: str,
+        *,
+        state: str | None = None,
+        severity: str | None = None,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | str | None = None,
+    ) -> tuple[AdvisoryData, ...]:
+        """List all security advisories for a repository."""
+        ...
+
     async def fetch_code_scanning_alerts(
         self,
         repo: str,

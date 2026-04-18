@@ -74,6 +74,17 @@ def test_scm_provider_protocol_accepts_full_custom_implementation() -> None:
         ) -> AdvisoryData:
             raise NotImplementedError
 
+        async def list_advisories(
+            self,
+            _repo: str,
+            *,
+            _state: str | None = None,
+            _severity: str | None = None,
+            _finding_id: str | None = None,
+            _workflow_run_id: uuid.UUID | str | None = None,
+        ) -> tuple[AdvisoryData, ...]:
+            raise NotImplementedError
+
         async def fetch_code_scanning_alerts(
             self,
             _repo: str,
@@ -162,6 +173,7 @@ def test_scm_provider_protocol_accepts_full_custom_implementation() -> None:
 def test_scm_provider_protocol_surface_has_expected_methods() -> None:
     expected = {
         "fetch_advisory",
+        "list_advisories",
         "fetch_code_scanning_alerts",
         "fetch_pr_diff",
         "post_pr_comment",

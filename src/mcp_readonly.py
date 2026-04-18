@@ -145,10 +145,22 @@ def _sanitize_optional(text: str | None, *, max_chars: int = 2000) -> str | None
     return sanitize_text(text, max_chars=max_chars)
 
 
+def _sanitize_evidence_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_text(value, max_chars=2000)
+    if isinstance(value, dict):
+        return {k: _sanitize_evidence_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_evidence_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_evidence_value(item) for item in value)
+    return value
+
+
 def _sanitize_evidence(evidence: dict[str, Any] | None) -> dict[str, Any] | None:
     if evidence is None:
         return None
-    return {k: sanitize_text(v, max_chars=2000) if isinstance(v, str) else v for k, v in evidence.items()}
+    return {k: _sanitize_evidence_value(v) for k, v in evidence.items()}
 
 
 def _parse_finding_id(raw: str) -> uuid.UUID:

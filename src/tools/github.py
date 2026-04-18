@@ -11,6 +11,7 @@ import re
 import uuid
 from datetime import datetime
 from typing import Any, Literal, Self, cast
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import structlog
@@ -204,6 +205,20 @@ def _require_pull_number(pull_number: int) -> int:
         msg = f"pull_number must be >= 1, got {pull_number}"
         raise ValueError(msg)
     return pull_number
+
+
+_LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
+
+
+def _next_cursor_from_link_header(response: httpx.Response) -> str | None:
+    """Extract ``after`` cursor from a GitHub ``Link`` header (cursor-based pagination)."""
+    link = response.headers.get("link", "")
+    match = _LINK_NEXT_RE.search(link)
+    if not match:
+        return None
+    qs = parse_qs(urlparse(match.group(1)).query)
+    values = qs.get("after", [])
+    return values[0] if values else None
 
 
 class _GitHubClientConfig(BaseModel):
@@ -452,6 +467,73 @@ class GitHubClient:
             finding_id=finding_id,
             workflow_run_id=workflow_run_id,
         )
+
+    async def list_repository_security_advisories(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str | None = None,
+        severity: str | None = None,
+        sort: str = "updated",
+        direction: str = "desc",
+        per_page: int = 30,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | str | None = None,
+    ) -> tuple[AdvisoryData, ...]:
+        """List all security advisories for a repository (cursor-paginated)."""
+        o = validate_github_repo_owner(owner)
+        r = validate_github_repo_name(repo)
+        if per_page < 1 or per_page > 100:
+            msg = "per_page must be between 1 and 100"
+            raise ValueError(msg)
+        path = f"/repos/{o}/{r}/security-advisories"
+        params: dict[str, str | int] = {
+            "per_page": per_page,
+            "sort": sort,
+            "direction": direction,
+        }
+        if state is not None:
+            params["state"] = state
+        if severity is not None:
+            params["severity"] = severity
+
+        collected: list[AdvisoryData] = []
+        max_pages = 20
+
+        for _ in range(max_pages):
+            response = await self._request(
+                "GET",
+                path,
+                params=params,
+                finding_id=finding_id,
+                workflow_run_id=workflow_run_id,
+            )
+            batch = _as_json_array(
+                response,
+                finding_id=finding_id,
+                workflow_run_id=workflow_run_id,
+            )
+            for item in batch:
+                if not isinstance(item, dict):
+                    continue
+                collected.append(
+                    _advisory_from_payload(
+                        item,
+                        source="repository",
+                        finding_id=finding_id,
+                        workflow_run_id=workflow_run_id,
+                    )
+                )
+            if len(batch) < per_page:
+                break
+            cursor = _next_cursor_from_link_header(response)
+            if cursor is None:
+                break
+            params["after"] = cursor
+            params.pop("before", None)
+
+        return tuple(collected)
 
     async def fetch_pull_request(
         self,

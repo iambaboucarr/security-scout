@@ -351,3 +351,29 @@ def test_settings_tracker_credentials_default_none() -> None:
     assert s.jira_api_email is None
     assert s.jira_api_token is None
     assert s.linear_api_key is None
+
+
+def test_settings_reads_secrets_from_directory(tmp_path: Path) -> None:
+    (tmp_path / "github_pat").write_text("ghp_secret_from_file", encoding="utf-8")
+    (tmp_path / "slack_bot_token").write_text("xoxb-from-file", encoding="utf-8")
+    s = Settings(
+        _env_file=None,
+        _secrets_dir=str(tmp_path),
+        github_webhook_secret="ws",
+        slack_signing_secret="ss",
+    )
+    assert s.github_pat == "ghp_secret_from_file"
+    assert s.slack_bot_token == "xoxb-from-file"
+
+
+def test_settings_env_vars_override_secrets_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "github_pat").write_text("from-file", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_PAT", "from-env")
+    s = Settings(
+        _env_file=None,
+        _secrets_dir=str(tmp_path),
+        github_webhook_secret="ws",
+        slack_bot_token="t",
+        slack_signing_secret="ss",
+    )
+    assert s.github_pat == "from-env"

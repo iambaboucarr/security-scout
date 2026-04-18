@@ -1,4 +1,4 @@
-.PHONY: help install format lint typecheck test testcov testslow check all clean \
+.PHONY: help install format lint typecheck test testcov testslow testintegration check all clean \
 	services services-down run worker migrate db-upgrade
 
 .DEFAULT_GOAL := help
@@ -47,6 +47,9 @@ testcov:
 
 testslow:
 	uv run pytest -m slow
+
+testintegration:
+	uv run pytest -m integration
 
 check: lint typecheck testcov
 

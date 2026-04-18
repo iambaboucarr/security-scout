@@ -363,6 +363,128 @@ async def test_non_json_success_body_raises_malformed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_repository_security_advisories_success() -> None:
+    items = [
+        {
+            "ghsa_id": "GHSA-AAAA-BBBB-CCCC",
+            "summary": "SQLi in API",
+            "description": "Details",
+            "severity": "high",
+            "identifiers": [{"type": "CVE", "value": "CVE-2024-0001"}],
+            "cwes": [{"cwe_id": "CWE-89"}],
+            "published_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-02T00:00:00Z",
+        },
+        {
+            "ghsa_id": "GHSA-DDDD-EEEE-FFFF",
+            "summary": "XSS in form",
+            "description": "More details",
+            "severity": "medium",
+            "identifiers": [],
+            "cwes": [],
+            "published_at": None,
+            "updated_at": None,
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "/repos/acme/app/security-advisories" in str(request.url)
+        assert "per_page=100" in str(request.url)
+        return httpx.Response(200, json=items)
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        result = await gh.list_repository_security_advisories("acme", "app", per_page=100)
+
+    assert len(result) == 2
+    assert result[0].ghsa_id == "GHSA-AAAA-BBBB-CCCC"
+    assert result[0].severity == "high"
+    assert result[0].source == "repository"
+    assert result[1].ghsa_id == "GHSA-DDDD-EEEE-FFFF"
+
+
+@pytest.mark.asyncio
+async def test_list_repository_security_advisories_empty() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        result = await gh.list_repository_security_advisories("acme", "app")
+
+    assert result == ()
+
+
+@pytest.mark.asyncio
+async def test_list_repository_security_advisories_with_filters() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        assert "state=published" in url
+        assert "severity=critical" in url
+        assert "sort=published" in url
+        assert "direction=asc" in url
+        return httpx.Response(200, json=[])
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        await gh.list_repository_security_advisories(
+            "acme",
+            "app",
+            state="published",
+            severity="critical",
+            sort="published",
+            direction="asc",
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_repository_security_advisories_paginates_with_cursor() -> None:
+    page1 = [{"ghsa_id": f"GHSA-{i:04d}-AAAA-BBBB", "summary": f"Adv {i}", "description": ""} for i in range(2)]
+    page2 = [{"ghsa_id": "GHSA-0002-AAAA-BBBB", "summary": "Last", "description": ""}]
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        url = str(request.url)
+        if "after=" not in url:
+            link = '<https://api.github.com/repos/a/b?after=cursor123>; rel="next"'
+            return httpx.Response(200, json=page1, headers={"link": link})
+        assert "after=cursor123" in url
+        return httpx.Response(200, json=page2)
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        result = await gh.list_repository_security_advisories("acme", "app", per_page=2)
+
+    assert call_count == 2
+    assert len(result) == 3
+
+
+@pytest.mark.asyncio
+async def test_list_repository_security_advisories_rejects_bad_per_page() -> None:
+    async with _transport(httpx.MockTransport(lambda r: httpx.Response(200, json=[]))) as client:
+        gh = GitHubClient("token", client=client)
+        with pytest.raises(ValueError, match="per_page"):
+            await gh.list_repository_security_advisories("acme", "app", per_page=0)
+        with pytest.raises(ValueError, match="per_page"):
+            await gh.list_repository_security_advisories("acme", "app", per_page=101)
+
+
+@pytest.mark.asyncio
+async def test_list_repository_security_advisories_api_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"message": "Forbidden"})
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        with pytest.raises(GitHubAPIError) as exc:
+            await gh.list_repository_security_advisories("acme", "app")
+
+    assert exc.value.http_status == 403
+
+
+@pytest.mark.asyncio
 async def test_client_requires_context_or_injected_http_client() -> None:
     gh = GitHubClient("token")
     with pytest.raises(RuntimeError, match="context manager"):

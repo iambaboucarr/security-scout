@@ -1,0 +1,44 @@
+{
+	email {env.CADDY_EMAIL}
+
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{env.CADDY_DOMAIN} {
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
+		Permissions-Policy "accelerometer=(), camera=(), geolocation=(), microphone=(), usb=(), payment=()"
+		-Server
+	}
+
+	handle /webhooks/* {
+		request_body {
+			max_size 2MB
+		}
+		reverse_proxy app:8000 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

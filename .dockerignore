@@ -1,0 +1,65 @@
+# ── VCS ──────────────────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+.github
+
+# ── Python build / cache artefacts ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ── Linter / test caches ─────────────────────────────────────────────────────
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.hypothesis/
+
+# ── IDE / editor ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ── Tests + docs
+docs/
+documentation/
+CONTRIBUTING.md
+CHANGELOG.md
+
+# ── Compose + Docker assets ──────────────────────────────────────────────────
+compose.yaml
+compose.prod.yaml
+docker-compose.yml
+docker-compose.*.yml
+Dockerfile
+.dockerignore
+deploy/
+sandbox/
+
+# ── Local dev state / secrets ────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+local/
+
+# ── Ops scripts + pre-commit config ──────────────────────────────────────────
+scripts/
+.pre-commit-config.yaml
+.zizmor.yml
