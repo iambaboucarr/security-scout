@@ -70,9 +70,18 @@ def _print_advisory_compact(adv: object, index: int) -> None:
 def _print_advisory_detail(adv: object, label: str) -> None:
     print(f"\n  {_bold(label)}")
     for field in (
-        "ghsa_id", "source", "summary", "severity", "cve_ids", "cwe_ids",
-        "cvss_vector", "cvss_score_api", "affected_package_name",
-        "affected_package_ecosystem", "html_url", "published_at",
+        "ghsa_id",
+        "source",
+        "summary",
+        "severity",
+        "cve_ids",
+        "cwe_ids",
+        "cvss_vector",
+        "cvss_score_api",
+        "affected_package_name",
+        "affected_package_ecosystem",
+        "html_url",
+        "published_at",
     ):
         val = getattr(adv, field, None)
         if val is not None and val != () and val != "":
@@ -192,9 +201,7 @@ async def run(
         # --- Test 5: Contributors ---
         print(f"\n[5/5] Fetching contributor count for {owner}/{repo}...")
         try:
-            count, truncated = await gh.fetch_repository_contributors_count_upper_bound(
-                owner, repo
-            )
+            count, truncated = await gh.fetch_repository_contributors_count_upper_bound(owner, repo)
             suffix = "+" if truncated else ""
             print(_green(f"  PASS: {count}{suffix} contributors"))
         except GitHubAPIError as exc:

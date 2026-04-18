@@ -153,7 +153,7 @@ def main() -> None:
     print(f"  Summary: {summary}")
     print(f"  Delivery ID: {delivery_id}")
     print(f"  Signature: {signature[:30]}...")
-    print(f"  Secret source: .env (GITHUB_WEBHOOK_SECRET)")
+    print("  Secret source: .env (GITHUB_WEBHOOK_SECRET)")
     print()
 
     resp = httpx.post(args.url, content=body, headers=headers)
