@@ -103,6 +103,7 @@ jobs:
         with:
           image: securityscout:ci-${{ github.sha }}
           severity-cutoff: high
+          only-fixed: true
           fail-build: true
 
   check:
