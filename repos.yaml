@@ -1,35 +1,19 @@
 # Monitored repositories. Read once at startup; restart required after edits.
 # Recommended: chmod 600 repos.yaml
 repos:
-  - name: example-app
-    github_org: your-org
-    github_repo: your-repo
+  - name: <REPO_NAME>
+    github_org: <GITHUB_ORG>
+    github_repo: <GITHUB_REPO>
     mode: observe
-    slack_channel: "#security-alerts"
+    slack_channel: <SLACK_CHANNEL>
     allowed_workflows: []
-    notify_on_severity:
-      - critical
-      - high
-    require_approval_for:
-      - critical
-      - high
-      - medium
-    issue_trackers:
-      - type: github_issues
-        security_label: security
-        search_closed: true
-      # JIRA Cloud / Server (auth via JIRA_API_TOKEN env var; JIRA_API_EMAIL for Cloud Basic auth):
-      # - type: jira
-      #   project_key: SEC
-      #   base_url: https://acme.atlassian.net
-      # Linear (auth via LINEAR_API_KEY env var):
-      # - type: linear
-      #   team_id: SECURITY
-      #   label_name: security
+    notify_on_severity: []
+    require_approval_for: []
+    issue_trackers: []
     dedup_semantic_search: false
-    accepted_risk_ttl_days: 90    # 0 = never expire
-    # Tiered governance. Omit this block entirely to keep strict approval for every
-    # finding above `informational`. Precedence: approve > notify > auto_resolve.
+    accepted_risk_ttl_days: 90
+    # Tiered governance. Omit to keep strict approval for every
+    # finding above informational. Precedence: approve > notify > auto_resolve.
     # governance:
     #   auto_resolve:
     #     - severity: [informational, low]
@@ -41,5 +25,4 @@ repos:
     #     - severity: [critical, high]
     #     - ssvc_action: [immediate]
     # approvers:
-    #   - slack_user: U12345AB  # tech lead
-    #   - slack_user: U67890CD  # senior dev
+    #   - slack_user: U12345AB

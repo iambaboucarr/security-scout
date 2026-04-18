@@ -83,6 +83,25 @@ class GitHubSCMProvider:
             workflow_run_id=workflow_run_id,
         )
 
+    async def list_advisories(
+        self,
+        repo: str,
+        *,
+        state: str | None = None,
+        severity: str | None = None,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | str | None = None,
+    ) -> tuple[AdvisoryData, ...]:
+        owner, name = _split_repo_slug(repo)
+        return await self._client.list_repository_security_advisories(
+            owner,
+            name,
+            state=state,
+            severity=severity,
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        )
+
     async def fetch_code_scanning_alerts(
         self,
         repo: str,

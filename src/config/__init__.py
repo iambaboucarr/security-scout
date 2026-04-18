@@ -153,6 +153,11 @@ def _env_file_path() -> Path | None:
     return p if p.is_file() else None
 
 
+def _secrets_dir() -> str | None:
+    p = Path("/run/secrets")
+    return str(p) if p.is_dir() else None
+
+
 _DEV_PLACEHOLDER_SECRETS: frozenset[str] = frozenset(
     {
         "dev-local-github-webhook-secret",
@@ -168,6 +173,7 @@ class Settings(BaseSettings):
         env_file=_env_file_path(),
         env_file_encoding="utf-8",
         extra="ignore",
+        secrets_dir=_secrets_dir(),
     )
 
     # Dev placeholders so `make run` works without a full `.env`; override for real GitHub/Slack.
@@ -203,7 +209,7 @@ class Settings(BaseSettings):
     alert_error_rate_window_minutes: int = 60
     alert_latency_p95_seconds: float = 60.0
 
-    # Host header validation (defence-in-depth behind reverse proxy)
+    # Host header validation
     trusted_hosts: list[str] = Field(default_factory=lambda: ["*"])
 
     # MCP read-only server

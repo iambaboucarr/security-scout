@@ -3,13 +3,16 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, log_and_persist_config_loaded, session_scope
@@ -18,6 +21,102 @@ from webhooks import create_github_webhook_router
 from webhooks.slack import create_slack_webhook_router
 
 _LOG = structlog.get_logger(__name__)
+
+_MAX_BODY_BYTES = 2_097_152  # 2 MB
+
+
+class ContentSizeLimitMiddleware:
+    """Reject requests whose body exceeds *max_bytes* with 413."""
+
+    def __init__(self, app: ASGIApp, *, max_bytes: int = _MAX_BODY_BYTES) -> None:
+        self._app = app
+        self._max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        content_length = self._header_value(scope, b"content-length")
+        if content_length is not None and int(content_length) > self._max_bytes:
+            await self._send_413(send)
+            return
+
+        received = 0
+
+        async def _limited_receive() -> dict[str, object]:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"")
+                received += len(body) if isinstance(body, bytes) else 0
+                if received > self._max_bytes:
+                    raise _BodyTooLarge
+            return dict(message)
+
+        try:
+            await self._app(scope, _limited_receive, send)
+        except _BodyTooLarge:
+            await self._send_413(send)
+
+    @staticmethod
+    def _header_value(scope: Scope, name: bytes) -> bytes | None:
+        headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
+        for key, value in headers:
+            if key.lower() == name:
+                return value
+        return None
+
+    @staticmethod
+    async def _send_413(send: Send) -> None:
+        body = b'{"detail":"Request body too large"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"content-length", str(len(body)).encode()],
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+async def _run_readiness_checks(engine: Any, redis_pool: Any) -> tuple[dict[str, Any], int]:
+    checks: dict[str, str] = {}
+    ok = True
+
+    if engine is None:
+        checks["db"] = "uninitialised"
+        ok = False
+    else:
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            checks["db"] = "ok"
+        except Exception:
+            _LOG.warning("readyz_db_check_failed", exc_info=True)
+            checks["db"] = "error"
+            ok = False
+
+    if redis_pool is None:
+        checks["redis"] = "uninitialised"
+        ok = False
+    else:
+        try:
+            await redis_pool.ping()
+            checks["redis"] = "ok"
+        except Exception:
+            _LOG.warning("readyz_redis_check_failed", exc_info=True)
+            checks["redis"] = "error"
+            ok = False
+
+    return {"status": "ok" if ok else "degraded", "checks": checks}, 200 if ok else 503
 
 
 def create_app() -> FastAPI:
@@ -72,7 +171,16 @@ def create_app() -> FastAPI:
         await engine.dispose()
         _LOG.info("app_shutdown_complete", metric_name="app_shutdown_complete")
 
-    app = FastAPI(title="Security Scout", lifespan=lifespan)
+    is_dev = settings.database_url.startswith("sqlite")
+    app = FastAPI(
+        title="Security Scout",
+        lifespan=lifespan,
+        docs_url="/docs" if is_dev else None,
+        redoc_url="/redoc" if is_dev else None,
+        openapi_url="/openapi.json" if is_dev else None,
+    )
+
+    app.add_middleware(ContentSizeLimitMiddleware)
 
     if settings.trusted_hosts != ["*"]:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
@@ -80,6 +188,13 @@ def create_app() -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
         return JSONResponse({"status": "ok"})
+
+    @app.get("/readyz")
+    async def readyz() -> JSONResponse:
+        engine = getattr(app.state, "engine", None)
+        redis_pool = getattr(app.state, "redis_pool", None)
+        body, status = await _run_readiness_checks(engine, redis_pool)
+        return JSONResponse(body, status_code=status)
 
     app.include_router(create_github_webhook_router())
     app.include_router(create_slack_webhook_router())

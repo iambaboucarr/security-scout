@@ -3,7 +3,7 @@ requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"
 
 [project]
-name = "security-scout"
+name = "securityscout"
 dynamic = ["version"]
 requires-python = ">=3.14"
 description = "General-purpose security agent for vulnerability triage and validation"
@@ -65,6 +65,13 @@ packages = ["src/agents", "src/tools", "src/webhooks", "src/config", "src/ai"]
 "src/main.py" = "main.py"
 "src/worker.py" = "worker.py"
 "src/mcp_readonly.py" = "mcp_readonly.py"
+
+# ── uv ───────────────────────────────────────────────────────────────────────
+
+[tool.uv]
+constraint-dependencies = [
+    "authlib>=1.6.11",  # GHSA-jj8c-mmj3-mmgv: CSRF on cache-backed OAuth
+]
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 

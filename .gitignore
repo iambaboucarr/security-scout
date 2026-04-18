@@ -10,8 +10,9 @@ build/
 .venv/
 venv/
 
-# Environment
+# Environment & production secrets
 .env
+secrets/
 
 # Type checking / linting / testing caches
 .mypy_cache/

@@ -47,6 +47,8 @@ from tools.scm.github import GitHubSCMProvider
 from tools.slack import SlackClient
 from webhooks.slack import SlackActionId
 
+pytestmark = pytest.mark.integration
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------

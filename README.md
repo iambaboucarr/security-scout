@@ -13,7 +13,7 @@ It orchestrates existing tools (Nuclei, Semgrep, CodeQL via SARIF) and adds the 
 ## Quick Start
 
 ```
-git clone <repo-url> && cd security-scout
+git clone <repo-url> && cd securityscout
 cp .env.example .env
 make install
 docker compose up -d

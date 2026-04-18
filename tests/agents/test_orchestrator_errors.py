@@ -11,6 +11,7 @@ from agents.orchestrator import (
     AdvisoryWorkflowState,
     ScheduleRetryParams,
     _best_effort_error_slack,
+    _safe_exc_detail,
     _truncate_log,
     run_advisory_workflow,
 )
@@ -590,6 +591,53 @@ async def test_slack_transient_opens_circuit_breaker(db_session, mocker) -> None
 
 
 # ── _best_effort_error_slack swallows SlackAPIError ───────────────────────
+
+
+def test_safe_exc_detail_returns_class_name_only() -> None:
+    secret = "token=sk-abc123 path=/home/user/secrets/config.yaml"
+    detail = _safe_exc_detail(RuntimeError(secret))
+    assert detail == "RuntimeError"
+    assert "token=" not in detail
+    assert "/home/user" not in detail
+
+
+def test_safe_exc_detail_preserves_custom_exception_type() -> None:
+    class _CustomBoom(Exception):
+        pass
+
+    detail = _safe_exc_detail(_CustomBoom("oops with /etc/passwd and api_key=x"))
+    assert detail == "_CustomBoom"
+    assert "passwd" not in detail
+    assert "api_key" not in detail
+
+
+@pytest.mark.asyncio
+async def test_slack_notify_on_triage_failure_excludes_exception_message(db_session, mocker) -> None:
+    secret_msg = "db-password=hunter2 /home/ci/app/.env"
+    mocker.patch(
+        "agents.orchestrator.run_advisory_triage",
+        side_effect=SecurityScoutError(secret_msg, is_transient=False),
+    )
+
+    async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
+        slack = SlackClient("xoxb-test", client=http)
+        slack.notify_workflow_error = AsyncMock()
+        gh = MagicMock(spec=GitHubClient)
+        scm = _make_scm(gh)
+        await run_advisory_workflow(
+            db_session,
+            _repo(),
+            scm,
+            http,
+            slack,
+            ghsa_id="GHSA-TEST-ABCD-EFGH",
+        )
+
+    slack.notify_workflow_error.assert_awaited_once()
+    call_kwargs = slack.notify_workflow_error.await_args.kwargs
+    assert call_kwargs["detail"] == "SecurityScoutError"
+    assert "hunter2" not in call_kwargs["detail"]
+    assert "/home/ci" not in call_kwargs["detail"]
 
 
 @pytest.mark.asyncio

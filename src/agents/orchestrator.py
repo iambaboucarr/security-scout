@@ -89,6 +89,11 @@ def _truncate_log(text: str | None, max_chars: int = _MAX_LOG_OUTPUT) -> str | N
     return text[: max_chars - 1] + "…"
 
 
+def _safe_exc_detail(exc: BaseException) -> str:
+    # Exception messages may leak paths/tokens; full text persists in WorkflowRun.error_message.
+    return type(exc).__name__
+
+
 async def _append_action_log(
     session: AsyncSession,
     *,
@@ -344,7 +349,7 @@ async def run_advisory_workflow(
                 slack,
                 repo.slack_channel,
                 title="Advisory triage failed",
-                detail=str(e),
+                detail=_safe_exc_detail(e),
                 workflow_run_id=run_stable_id,
                 finding_id=None,
             )
@@ -378,7 +383,7 @@ async def run_advisory_workflow(
                 slack,
                 repo.slack_channel,
                 title="Advisory workflow failed (unrecoverable)",
-                detail=str(e),
+                detail=_safe_exc_detail(e),
                 workflow_run_id=run_stable_id,
                 finding_id=None,
             )
@@ -677,7 +682,7 @@ async def run_advisory_workflow(
             slack,
             repo.slack_channel,
             title="Slack finding report failed",
-            detail=str(e),
+            detail=_safe_exc_detail(e),
             workflow_run_id=run_stable_id,
             finding_id=str(finding.id),
         )
@@ -707,7 +712,7 @@ async def run_advisory_workflow(
             slack,
             repo.slack_channel,
             title="Slack finding report failed",
-            detail=str(e),
+            detail=_safe_exc_detail(e),
             workflow_run_id=run_stable_id,
             finding_id=str(finding.id),
         )
@@ -741,7 +746,7 @@ async def run_advisory_workflow(
             slack,
             repo.slack_channel,
             title="Reporting step failed (unrecoverable)",
-            detail=str(e),
+            detail=_safe_exc_detail(e),
             workflow_run_id=run_stable_id,
             finding_id=str(finding.id),
         )
