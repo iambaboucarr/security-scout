@@ -1,26 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Orchestrator agent: event routing + advisory workflow state machine.
-
-Tool access (least-privilege):
-    ALLOWED:
-        - poc_preflight.validate
-
-    NOT ALLOWED:
-        - scm.fetch_advisory, scm.read_code, scm.fetch_pr_diff, etc.
-        - sast_adapter.scan
-        - docker_sandbox.build / run / destroy
-        - nuclei.run
-        - slack.send_finding, slack.request_approval   (Slack Handler agent)
-
-    Temporary: the orchestrator calls SlackClient directly for finding reports
-    and error notifications until the Slack Handler agent is separated. Once
-    interactive Slack workflows exist, Slack tool access moves to the dedicated
-    handler and the orchestrator delegates via state transitions.
-
-    Receives ``SCMProvider``, not ``GitHubClient`` directly.
-    The provider is passed through to subordinate agents (triage).
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -42,6 +20,8 @@ from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
 from tools.issue_tracker import IssueTrackerCredentials
+from tools.poc_preflight import PreflightVerdict
+from tools.poc_preflight import validate as run_preflight
 from tools.rate_limiter import RateLimiterCircuitOpen, RateLimitExceeded, SlidingWindowRateLimiter
 from tools.scm.protocol import SCMProvider
 from tools.slack import (
@@ -63,6 +43,9 @@ class AdvisoryWorkflowState(StrEnum):
     received = "received"
     triaging = "triaging"
     triage_complete = "triage_complete"
+    pre_flight = "pre_flight"
+    pre_flight_suspicious = "pre_flight_suspicious"
+    pre_flight_blocked = "pre_flight_blocked"
     reporting = "reporting"
     awaiting_approval = "awaiting_approval"
     done = "done"
@@ -430,6 +413,7 @@ async def run_advisory_workflow(
     )
     if run.state not in (
         AdvisoryWorkflowState.triage_complete.value,
+        AdvisoryWorkflowState.pre_flight.value,
         AdvisoryWorkflowState.reporting.value,
     ):
         msg = f"unexpected workflow state before reporting: {run.state!r}"
@@ -471,6 +455,137 @@ async def run_advisory_workflow(
         )
         return run
 
+    # --- Pre-flight validation (mandatory gate before sandbox execution) ---
+    poc_content = finding.reproduction
+    if poc_content and run.state == AdvisoryWorkflowState.triage_complete.value:
+        run.state = AdvisoryWorkflowState.pre_flight.value
+        await session.commit()
+        log.info(
+            "workflow_state_transition",
+            metric_name="workflow_state_current",
+            from_state=AdvisoryWorkflowState.triage_complete.value,
+            to_state=AdvisoryWorkflowState.pre_flight.value,
+            workflow_run_id=str(run_stable_id),
+        )
+
+        try:
+            preflight_result = await run_preflight(
+                poc_content,
+                cwe_ids=finding.cwe_ids,
+            )
+        except Exception as e:
+            # Pre-flight errors → treat PoC as suspicious (fail-closed)
+            log.warning(
+                "preflight_error_fail_closed",
+                metric_name="preflight_verdict_total",
+                verdict="suspicious",
+                workflow_run_id=str(run_stable_id),
+                err=str(e),
+            )
+            await _append_action_log(
+                session,
+                workflow_run_id=run_stable_id,
+                agent="orchestrator",
+                tool_name="poc_preflight.validate",
+                tool_inputs={"finding_id": str(finding.id)},
+                tool_output=f"error: {_truncate_log(str(e))}",
+            )
+            run.state = AdvisoryWorkflowState.pre_flight_suspicious.value
+            await session.commit()
+            await _best_effort_error_slack(
+                slack,
+                repo.slack_channel,
+                title="PoC pre-flight validation error — requires manual review",
+                detail=_safe_exc_detail(e),
+                workflow_run_id=run_stable_id,
+                finding_id=str(finding.id),
+            )
+            log.info(
+                "workflow_state_transition",
+                metric_name="workflow_state_current",
+                from_state=AdvisoryWorkflowState.pre_flight.value,
+                to_state=AdvisoryWorkflowState.pre_flight_suspicious.value,
+                workflow_run_id=str(run_stable_id),
+            )
+            return run
+
+        await _append_action_log(
+            session,
+            workflow_run_id=run_stable_id,
+            agent="orchestrator",
+            tool_name="poc_preflight.validate",
+            tool_inputs={
+                "finding_id": str(finding.id),
+                "cwe_ids": finding.cwe_ids,
+            },
+            tool_output=_truncate_log(
+                f"verdict={preflight_result.verdict.value} "
+                f"score={preflight_result.score:.3f} "
+                f"indicators={[i.detail for i in preflight_result.indicators]}"
+            ),
+        )
+        await session.commit()
+
+        if preflight_result.verdict == PreflightVerdict.MALICIOUS:
+            run.state = AdvisoryWorkflowState.pre_flight_blocked.value
+            run.completed_at = _now_utc()
+            await session.commit()
+            log.warning(
+                "preflight_blocked",
+                metric_name="preflight_verdict_total",
+                verdict="malicious",
+                score=preflight_result.score,
+                workflow_run_id=str(run_stable_id),
+                finding_id=str(finding.id),
+            )
+            log.info(
+                "workflow_state_transition",
+                metric_name="workflow_state_current",
+                from_state=AdvisoryWorkflowState.pre_flight.value,
+                to_state=AdvisoryWorkflowState.pre_flight_blocked.value,
+                workflow_run_id=str(run_stable_id),
+            )
+            await _best_effort_error_slack(
+                slack,
+                repo.slack_channel,
+                title="PoC blocked — malicious indicators detected",
+                detail=f"Score {preflight_result.score:.2f}: "
+                + ", ".join(i.detail for i in preflight_result.indicators[:5]),
+                workflow_run_id=run_stable_id,
+                finding_id=str(finding.id),
+            )
+            return run
+
+        if preflight_result.verdict == PreflightVerdict.SUSPICIOUS:
+            run.state = AdvisoryWorkflowState.pre_flight_suspicious.value
+            await session.commit()
+            log.info(
+                "workflow_state_transition",
+                metric_name="workflow_state_current",
+                from_state=AdvisoryWorkflowState.pre_flight.value,
+                to_state=AdvisoryWorkflowState.pre_flight_suspicious.value,
+                workflow_run_id=str(run_stable_id),
+            )
+            await _best_effort_error_slack(
+                slack,
+                repo.slack_channel,
+                title="PoC flagged as suspicious — awaiting manual review",
+                detail=f"Score {preflight_result.score:.2f}: "
+                + ", ".join(i.detail for i in preflight_result.indicators[:5]),
+                workflow_run_id=run_stable_id,
+                finding_id=str(finding.id),
+            )
+            return run
+
+        # CLEAN — continue to reporting
+        log.info(
+            "preflight_clean",
+            metric_name="preflight_verdict_total",
+            verdict="clean",
+            score=preflight_result.score,
+            workflow_run_id=str(run_stable_id),
+        )
+
     if breaker.take_resume_log_event("slack"):
         await _append_action_log(
             session,
@@ -510,7 +625,10 @@ async def run_advisory_workflow(
             missing_message="workflow run missing after Slack circuit deferral",
         )
 
-    if rate_limiter is not None and run.state == AdvisoryWorkflowState.triage_complete.value:
+    if rate_limiter is not None and run.state in (
+        AdvisoryWorkflowState.triage_complete.value,
+        AdvisoryWorkflowState.pre_flight.value,
+    ):
         try:
             slack_limit = repo.rate_limits.slack_findings_per_hour if repo.rate_limits else 30
             await rate_limiter.check_and_increment(
@@ -596,14 +714,18 @@ async def run_advisory_workflow(
             )
             return run
 
-    if run.state == AdvisoryWorkflowState.triage_complete.value:
+    if run.state in (
+        AdvisoryWorkflowState.triage_complete.value,
+        AdvisoryWorkflowState.pre_flight.value,
+    ):
+        prev_reporting = run.state
         run.state = AdvisoryWorkflowState.reporting.value
         await session.commit()
 
         log.info(
             "workflow_state_transition",
             metric_name="workflow_state_current",
-            from_state=AdvisoryWorkflowState.triage_complete.value,
+            from_state=prev_reporting,
             to_state=AdvisoryWorkflowState.reporting.value,
             workflow_run_id=str(run_stable_id),
         )
