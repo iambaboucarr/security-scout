@@ -160,6 +160,11 @@ markers = [
 ]
 addopts = "-x --strict-markers"
 
+# ── Codespell ─────────────────────────────────────────────────────────────────
+
+[tool.codespell]
+ignore-words-list = "requets"
+
 # ── Coverage ──────────────────────────────────────────────────────────────────
 
 [tool.coverage.run]
