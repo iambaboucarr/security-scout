@@ -132,15 +132,8 @@ async def build_environment(
             )
         except SandboxBuildError:
             raise
-        except NotImplementedError:
-            log.info("build_image_not_implemented_using_sandbox_image")
-            return EnvBuildResult(
-                image_tag=sandbox_image,
-                repo_path=repo_path,
-                detected_stack=stack,
-                build_log="build_image not yet implemented; using sandbox image",
-            )
         except Exception as exc:
+            # Non-SandboxBuildError: unexpected docker-py or asyncio.to_thread failure.
             msg = f"image build failed for {repo_slug}@{ref}: {exc}"
             raise PermanentError(msg) from exc
 

@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Hardened PoC executor image — non-root, minimal surface. Security Scout runs
+# arbitrary PoC commands via `docker_sandbox.run_container` with this image tag
+# or a repo-built image; this Dockerfile is the default base when no repo Dockerfile exists.
+#
+# Build: docker build -f sandbox/Dockerfile.sandbox -t securityscout/sandbox:latest sandbox
+# (context must include files under sandbox/ if you COPY them; none required here.)
+
+FROM python:3.14-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 1000 scout \
+    && useradd -m -u 1000 -g 1000 -s /bin/bash scout
+
+USER 1000:1000
+WORKDIR /workspace
+
+CMD ["/bin/sh", "-c", "exec sleep infinity"]
