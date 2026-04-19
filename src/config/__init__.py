@@ -215,6 +215,9 @@ class Settings(BaseSettings):
     # MCP read-only server
     mcp_client_allowlist: list[str] = Field(default_factory=list)
 
+    # Container runtime (Docker or Podman API socket for PoC sandbox execution)
+    container_socket: str = "unix:///var/run/docker.sock"
+
     @model_validator(mode="after")
     def _reject_dev_placeholders_in_production(self) -> Self:
         if self.database_url.startswith("sqlite"):

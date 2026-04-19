@@ -21,7 +21,7 @@ from pathlib import Path
 import structlog
 
 from models import FindingStatus
-from tools.docker_sandbox import SandboxConfig, SandboxError, SandboxTimeoutError, run_container
+from tools.docker_sandbox import SandboxConfig, SandboxError, run_container
 from tools.input_sanitiser import sanitize_text
 from tools.nuclei import NucleiError, run_nuclei
 
@@ -174,7 +174,7 @@ async def execute_poc(
     try:
         async with asyncio.timeout(wall_clock_s):
             result = await run_container(config, socket=container_socket)
-    except TimeoutError, SandboxTimeoutError:
+    except TimeoutError:
         log.warning("poc_execution_timeout", wall_clock_seconds=wall_clock_s)
         return ExecutionResult(
             confidence_tier=FindingStatus.error,

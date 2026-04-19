@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, NoReturn
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,7 +15,8 @@ from agents.env_builder import (
     build_environment,
     detect_stack,
 )
-from exceptions import TransientError
+from exceptions import PermanentError, TransientError
+from tools.docker_sandbox import BuildResult, SandboxBuildError
 from tools.scm.protocol import SCMProvider
 
 # ---------------------------------------------------------------------------
@@ -120,20 +122,75 @@ async def test_build_environment_no_dockerfile_uses_sandbox_image(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_build_environment_with_dockerfile_falls_back_to_sandbox(tmp_path: Path) -> None:
+async def test_build_environment_with_dockerfile_uses_build_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo_dir = tmp_path / "myrepo"
     repo_dir.mkdir()
     (repo_dir / "Dockerfile").write_text("FROM python:3.14")
 
     scm = _make_scm(repo_dir)
+
+    async def fake_build(*_a: Any, **_k: Any) -> BuildResult:
+        return BuildResult(image_tag="scout-target-org-myrepo:v1.0.0", build_log="build ok")
+
+    monkeypatch.setattr("agents.env_builder.build_image", fake_build)
+
     result = await build_environment(
         scm,
         repo_slug="org/myrepo",
         ref="v1.0.0",
         work_dir=tmp_path,
     )
-    assert result.image_tag == "securityscout/sandbox:latest"
-    assert "not yet implemented" in result.build_log
+    assert result.image_tag == "scout-target-org-myrepo:v1.0.0"
+    assert "build ok" in result.build_log
+    assert result.detected_stack == DetectedStack.DOCKERFILE
+
+
+@pytest.mark.asyncio
+async def test_build_environment_sandbox_build_error_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()
+    (repo_dir / "Dockerfile").write_text("FROM scratch\n")
+    scm = _make_scm(repo_dir)
+
+    async def fail_build(*_a: Any, **_k: Any) -> NoReturn:
+        raise SandboxBuildError("daemon refused")
+
+    monkeypatch.setattr("agents.env_builder.build_image", fail_build)
+
+    with pytest.raises(SandboxBuildError, match="daemon refused"):
+        await build_environment(
+            scm,
+            repo_slug="org/myrepo",
+            ref="v1.0.0",
+            work_dir=tmp_path,
+        )
+
+
+@pytest.mark.asyncio
+async def test_build_environment_image_build_failure_is_permanent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()
+    (repo_dir / "Dockerfile").write_text("FROM scratch\n")
+    scm = _make_scm(repo_dir)
+
+    async def boom(*_a: Any, **_k: Any) -> NoReturn:
+        raise RuntimeError("build exploded")
+
+    monkeypatch.setattr("agents.env_builder.build_image", boom)
+
+    with pytest.raises(PermanentError, match="image build failed"):
+        await build_environment(
+            scm,
+            repo_slug="org/myrepo",
+            ref="v1.0.0",
+            work_dir=tmp_path,
+        )
 
 
 @pytest.mark.asyncio

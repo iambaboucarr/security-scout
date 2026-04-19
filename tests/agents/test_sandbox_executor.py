@@ -19,7 +19,7 @@ from agents.sandbox_executor import (
     execute_poc,
 )
 from models import FindingStatus
-from tools.docker_sandbox import SandboxConfig, SandboxError, SandboxResult, SandboxTimeoutError
+from tools.docker_sandbox import SandboxConfig, SandboxError, SandboxResult
 from tools.nuclei import NucleiMatch, NucleiResult
 
 # ---------------------------------------------------------------------------
@@ -162,8 +162,14 @@ class TestExtractEvidence:
 
 @pytest.mark.asyncio
 async def test_execute_poc_timeout(tmp_path: Path) -> None:
-    mock_result = SandboxTimeoutError("timed out")
-    with patch("agents.sandbox_executor.run_container", new_callable=AsyncMock, side_effect=mock_result):
+    sandbox_result = SandboxResult(
+        exit_code=137,
+        stdout="",
+        stderr="",
+        timed_out=True,
+        elapsed_seconds=60.0,
+    )
+    with patch("agents.sandbox_executor.run_container", new_callable=AsyncMock, return_value=sandbox_result):
         result = await execute_poc(
             image="test:latest",
             poc_command=["python", "-c", "while True: pass"],
