@@ -20,6 +20,14 @@ _CLONE_TIMEOUT_SECONDS = 120
 
 _TOKEN_IN_URL_RE = re.compile(r"(https?://)[^@]+@", re.IGNORECASE)
 
+_SHA_FULL_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_SHA_SHORT_RE = re.compile(r"^[0-9a-f]{7,39}$", re.IGNORECASE)
+
+
+def is_sha_ref(ref: str) -> bool:
+    """Return ``True`` if *ref* looks like a Git commit SHA (7-40 hex chars)."""
+    return bool(_SHA_FULL_RE.match(ref) or _SHA_SHORT_RE.match(ref))
+
 
 class CloneError(SecurityScoutError):
     """Raised when ``git clone`` fails."""
@@ -183,10 +191,34 @@ class GitHubSCMProvider:
         ref: str,
         dest: Path,
     ) -> Path:
+        """Clone *repo* at *ref* into *dest*.
+
+        For branch/tag refs: shallow clone with ``--branch``.
+        For SHA refs (7-40 hex chars): full clone (``--no-checkout``) then
+        ``git fetch origin <sha> && git checkout <sha>`` — required because
+        ``--branch`` does not accept arbitrary commit SHAs.
+        """
         owner, name = _split_repo_slug(repo)
         clone_url = f"https://x-access-token:{self._token}@github.com/{owner}/{name}.git"
         dest.mkdir(parents=True, exist_ok=True)
+        repo_dir = dest / name
 
+        if is_sha_ref(ref):
+            await self._clone_at_sha(clone_url, ref, repo_dir, owner=owner, name=name)
+        else:
+            await self._clone_at_branch(clone_url, ref, repo_dir, owner=owner, name=name)
+
+        return repo_dir
+
+    async def _clone_at_branch(
+        self,
+        clone_url: str,
+        ref: str,
+        repo_dir: Path,
+        *,
+        owner: str,
+        name: str,
+    ) -> None:
         proc = await asyncio.create_subprocess_exec(
             "git",
             "clone",
@@ -196,15 +228,12 @@ class GitHubSCMProvider:
             ref,
             "--single-branch",
             clone_url,
-            str(dest / name),
+            str(repo_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=_CLONE_TIMEOUT_SECONDS,
-            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_CLONE_TIMEOUT_SECONDS)
         except TimeoutError as exc:
             proc.kill()
             await proc.wait()
@@ -216,7 +245,86 @@ class GitHubSCMProvider:
             safe_msg = _TOKEN_IN_URL_RE.sub(r"\1<REDACTED>@", raw)
             msg = f"git clone failed for {owner}/{name}@{ref}: {safe_msg}"
             raise CloneError(msg)
-        return dest / name
+
+    async def _clone_at_sha(
+        self,
+        clone_url: str,
+        sha: str,
+        repo_dir: Path,
+        *,
+        owner: str,
+        name: str,
+    ) -> None:
+        """Clone without checkout, fetch the specific SHA, then checkout."""
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "clone",
+            "--no-checkout",
+            clone_url,
+            str(repo_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_CLONE_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            msg = f"git clone timed out for {owner}/{name}@{sha} after {_CLONE_TIMEOUT_SECONDS}s"
+            raise CloneError(msg, is_transient=True) from exc
+
+        if proc.returncode != 0:
+            raw = stderr.decode("utf-8", errors="replace").strip()
+            safe_msg = _TOKEN_IN_URL_RE.sub(r"\1<REDACTED>@", raw)
+            msg = f"git clone failed for {owner}/{name}@{sha}: {safe_msg}"
+            raise CloneError(msg)
+
+        fetch = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(repo_dir),
+            "fetch",
+            "origin",
+            sha,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(fetch.communicate(), timeout=_CLONE_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            fetch.kill()
+            await fetch.wait()
+            msg = f"git fetch timed out for {owner}/{name}@{sha}"
+            raise CloneError(msg, is_transient=True) from exc
+
+        if fetch.returncode != 0:
+            raw = stderr.decode("utf-8", errors="replace").strip()
+            safe_msg = _TOKEN_IN_URL_RE.sub(r"\1<REDACTED>@", raw)
+            msg = f"git fetch failed for {owner}/{name}@{sha}: {safe_msg}"
+            raise CloneError(msg)
+
+        checkout = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(repo_dir),
+            "checkout",
+            sha,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(checkout.communicate(), timeout=30)
+        except TimeoutError as exc:
+            checkout.kill()
+            await checkout.wait()
+            msg = f"git checkout timed out for {owner}/{name}@{sha}"
+            raise CloneError(msg, is_transient=True) from exc
+
+        if checkout.returncode != 0:
+            raw = stderr.decode("utf-8", errors="replace").strip()
+            safe_msg = _TOKEN_IN_URL_RE.sub(r"\1<REDACTED>@", raw)
+            msg = f"git checkout failed for {owner}/{name}@{sha}: {safe_msg}"
+            raise CloneError(msg)
 
     # -- Additional methods required by current agents -----------------------
 
@@ -270,4 +378,4 @@ class GitHubSCMProvider:
         )
 
 
-__all__ = ["CloneError", "GitHubSCMProvider"]
+__all__ = ["CloneError", "GitHubSCMProvider", "is_sha_ref"]

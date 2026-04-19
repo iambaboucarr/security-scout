@@ -1,24 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import shutil
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agents.env_builder import build_environment
 from agents.governance import GovernanceTier, decide_governance_tier
+from agents.sandbox_executor import ExecutionResult, PocType, execute_poc
 from agents.triage import run_advisory_triage
 from ai.provider import LLMProvider
 from config import RepoConfig
 from exceptions import SecurityScoutError
 from models import AgentActionLog, Finding, WorkflowKind, WorkflowRun
 from tools.circuit_breaker import ExternalApiCircuitBreaker
+from tools.docker_sandbox import SandboxError
 from tools.issue_tracker import IssueTrackerCredentials
 from tools.poc_preflight import PreflightVerdict
 from tools.poc_preflight import validate as run_preflight
@@ -46,10 +51,14 @@ class AdvisoryWorkflowState(StrEnum):
     pre_flight = "pre_flight"
     pre_flight_suspicious = "pre_flight_suspicious"
     pre_flight_blocked = "pre_flight_blocked"
+    building_env = "building_env"
+    executing_sandbox = "executing_sandbox"
+    sandbox_complete = "sandbox_complete"
     reporting = "reporting"
     awaiting_approval = "awaiting_approval"
     done = "done"
     error_triage = "error_triage"
+    error_sandbox = "error_sandbox"
     error_reporting = "error_reporting"
     error_unrecoverable = "error_unrecoverable"
 
@@ -145,13 +154,16 @@ async def run_advisory_workflow(
     resume_workflow_run_id: uuid.UUID | None = None,
     rate_limiter: SlidingWindowRateLimiter | None = None,
     tracker_credentials: IssueTrackerCredentials | None = None,
+    work_dir: Path | None = None,
+    container_socket: str = "unix:///var/run/docker.sock",
 ) -> WorkflowRun:
     """Run or resume the advisory triage → Slack report workflow.
 
     When *resume_workflow_run_id* is ``None`` a fresh ``WorkflowRun`` is created.
     Pass an existing run's UUID to resume from where it left off (must be in
-    ``triaging``, ``triage_complete``, or ``reporting`` state).  The resumed run
-    keeps its original ``id``, ``started_at``, and ``retry_count``.
+    ``triaging``, ``triage_complete``, ``building_env``, ``executing_sandbox``,
+    ``sandbox_complete``, or ``reporting`` state).  The resumed run keeps its
+    original ``id``, ``started_at``, and ``retry_count``.
     """
     log = _LOG.bind(agent="orchestrator", run_id=str(run_id) if run_id else None)
     breaker = circuit_breaker or ExternalApiCircuitBreaker()
@@ -206,6 +218,9 @@ async def run_advisory_workflow(
         if loaded.state not in (
             AdvisoryWorkflowState.triaging.value,
             AdvisoryWorkflowState.triage_complete.value,
+            AdvisoryWorkflowState.building_env.value,
+            AdvisoryWorkflowState.executing_sandbox.value,
+            AdvisoryWorkflowState.sandbox_complete.value,
             AdvisoryWorkflowState.reporting.value,
         ):
             msg = f"cannot resume from state {loaded.state!r}"
@@ -414,6 +429,9 @@ async def run_advisory_workflow(
     if run.state not in (
         AdvisoryWorkflowState.triage_complete.value,
         AdvisoryWorkflowState.pre_flight.value,
+        AdvisoryWorkflowState.building_env.value,
+        AdvisoryWorkflowState.executing_sandbox.value,
+        AdvisoryWorkflowState.sandbox_complete.value,
         AdvisoryWorkflowState.reporting.value,
     ):
         msg = f"unexpected workflow state before reporting: {run.state!r}"
@@ -577,7 +595,7 @@ async def run_advisory_workflow(
             )
             return run
 
-        # CLEAN — continue to reporting
+        # CLEAN — proceed to sandbox execution
         log.info(
             "preflight_clean",
             metric_name="preflight_verdict_total",
@@ -585,6 +603,57 @@ async def run_advisory_workflow(
             score=preflight_result.score,
             workflow_run_id=str(run_stable_id),
         )
+
+        run.state = AdvisoryWorkflowState.building_env.value
+        await session.commit()
+        log.info(
+            "workflow_state_transition",
+            metric_name="workflow_state_current",
+            from_state=AdvisoryWorkflowState.pre_flight.value,
+            to_state=AdvisoryWorkflowState.building_env.value,
+            workflow_run_id=str(run_stable_id),
+        )
+
+    # --- Sandbox execution (building_env → executing_sandbox → sandbox_complete) ---
+    if run.state == AdvisoryWorkflowState.executing_sandbox.value:
+        run = await _require_run(
+            session,
+            run_stable_id,
+            missing_message="workflow run missing before sandbox resume",
+        )
+        run.state = AdvisoryWorkflowState.building_env.value
+        await session.commit()
+        log.info(
+            "workflow_state_transition",
+            metric_name="workflow_state_current",
+            from_state=AdvisoryWorkflowState.executing_sandbox.value,
+            to_state=AdvisoryWorkflowState.building_env.value,
+            workflow_run_id=str(run_stable_id),
+        )
+
+    if run.state == AdvisoryWorkflowState.building_env.value:
+        await _run_sandbox_phase(
+            session=session,
+            run_stable_id=run_stable_id,
+            finding=finding,
+            repo=repo,
+            scm=scm,
+            slack=slack,
+            log=log,
+            work_dir=work_dir,
+            container_socket=container_socket,
+            schedule_retry=schedule_retry,
+        )
+        run = await _require_run(
+            session,
+            run_stable_id,
+            missing_message="workflow run missing after sandbox phase",
+        )
+        if run.state in (
+            AdvisoryWorkflowState.error_sandbox.value,
+            AdvisoryWorkflowState.error_unrecoverable.value,
+        ):
+            return run
 
     if breaker.take_resume_log_event("slack"):
         await _append_action_log(
@@ -628,6 +697,7 @@ async def run_advisory_workflow(
     if rate_limiter is not None and run.state in (
         AdvisoryWorkflowState.triage_complete.value,
         AdvisoryWorkflowState.pre_flight.value,
+        AdvisoryWorkflowState.sandbox_complete.value,
     ):
         try:
             slack_limit = repo.rate_limits.slack_findings_per_hour if repo.rate_limits else 30
@@ -717,6 +787,7 @@ async def run_advisory_workflow(
     if run.state in (
         AdvisoryWorkflowState.triage_complete.value,
         AdvisoryWorkflowState.pre_flight.value,
+        AdvisoryWorkflowState.sandbox_complete.value,
     ):
         prev_reporting = run.state
         run.state = AdvisoryWorkflowState.reporting.value
@@ -903,6 +974,323 @@ async def run_advisory_workflow(
     )
 
     return run
+
+
+async def _run_sandbox_phase(
+    *,
+    session: AsyncSession,
+    run_stable_id: uuid.UUID,
+    finding: Finding,
+    repo: RepoConfig,
+    scm: SCMProvider,
+    slack: SlackClient,
+    log: Any,
+    work_dir: Path | None,
+    container_socket: str,
+    schedule_retry: Callable[[ScheduleRetryParams], Awaitable[None]] | None,
+) -> ExecutionResult | None:
+    """Run env build → sandbox execute → sandbox_complete.
+
+    Returns ``ExecutionResult`` on success, ``None`` on error (run state already
+    updated to ``error_sandbox`` or ``error_unrecoverable``).
+    """
+    import tempfile
+
+    owns_work_dir = work_dir is None
+    effective_work_dir = work_dir or Path(tempfile.mkdtemp(prefix="scout-"))
+    try:
+        return await _run_sandbox_phase_inner(
+            session=session,
+            run_stable_id=run_stable_id,
+            finding=finding,
+            repo=repo,
+            scm=scm,
+            slack=slack,
+            log=log,
+            effective_work_dir=effective_work_dir,
+            container_socket=container_socket,
+            schedule_retry=schedule_retry,
+        )
+    finally:
+        if owns_work_dir:
+            shutil.rmtree(effective_work_dir, ignore_errors=True)
+
+
+async def _run_sandbox_phase_inner(
+    *,
+    session: AsyncSession,
+    run_stable_id: uuid.UUID,
+    finding: Finding,
+    repo: RepoConfig,
+    scm: SCMProvider,
+    slack: SlackClient,
+    log: Any,
+    effective_work_dir: Path,
+    container_socket: str,
+    schedule_retry: Callable[[ScheduleRetryParams], Awaitable[None]] | None,
+) -> ExecutionResult | None:
+    repo_slug = f"{repo.github_org}/{repo.github_repo}"
+
+    run = await _require_run(session, run_stable_id, missing_message="run missing in sandbox phase")
+
+    # --- Build environment ---
+    try:
+        env_result = await build_environment(
+            scm,
+            repo_slug=repo_slug,
+            ref=finding.source_ref.split("@")[-1] if "@" in finding.source_ref else "HEAD",
+            work_dir=effective_work_dir,
+            container_socket=container_socket,
+        )
+    except SecurityScoutError as e:
+        if e.is_transient:
+            run = await _require_run(session, run_stable_id, missing_message="run missing after env build failure")
+            if run.retry_count < 3 and schedule_retry is not None:
+                delay = max(1, 2**run.retry_count)
+                run.retry_count += 1
+                await session.commit()
+                log.warning(
+                    "workflow_transient_retry",
+                    metric_name="workflow_error_total",
+                    phase="building_env",
+                    workflow_run_id=str(run_stable_id),
+                    retry_count=run.retry_count,
+                    delay_seconds=delay,
+                )
+                await schedule_retry(
+                    ScheduleRetryParams(
+                        workflow_run_id=run_stable_id,
+                        delay_seconds=delay,
+                        state=AdvisoryWorkflowState.building_env.value,
+                        reason="env_build_transient",
+                    ),
+                )
+                return None
+            run.state = AdvisoryWorkflowState.error_sandbox.value
+            run.error_message = _truncate_log(str(e), 4000)
+            run.completed_at = _now_utc()
+            await session.commit()
+            log.warning(
+                "workflow_error",
+                metric_name="workflow_error_total",
+                phase="building_env",
+                workflow_run_id=str(run_stable_id),
+                err=str(e),
+            )
+            await _append_action_log(
+                session,
+                workflow_run_id=run_stable_id,
+                agent="env_builder",
+                tool_name="build_environment",
+                tool_inputs={"repo": repo_slug},
+                tool_output=str(e),
+            )
+            await session.commit()
+            await _best_effort_error_slack(
+                slack,
+                repo.slack_channel,
+                title="Environment build failed",
+                detail=_safe_exc_detail(e),
+                workflow_run_id=run_stable_id,
+                finding_id=str(finding.id),
+            )
+            return None
+        run = await _require_run(session, run_stable_id, missing_message="run missing after env build failure")
+        run.state = AdvisoryWorkflowState.error_sandbox.value
+        run.error_message = _truncate_log(str(e), 4000)
+        run.completed_at = _now_utc()
+        await session.commit()
+        log.warning(
+            "workflow_error",
+            metric_name="workflow_error_total",
+            phase="building_env",
+            workflow_run_id=str(run_stable_id),
+            err=str(e),
+        )
+        await _append_action_log(
+            session,
+            workflow_run_id=run_stable_id,
+            agent="env_builder",
+            tool_name="build_environment",
+            tool_inputs={"repo": repo_slug},
+            tool_output=str(e),
+        )
+        await session.commit()
+        await _best_effort_error_slack(
+            slack,
+            repo.slack_channel,
+            title="Environment build failed (permanent)",
+            detail=_safe_exc_detail(e),
+            workflow_run_id=run_stable_id,
+            finding_id=str(finding.id),
+        )
+        return None
+    except Exception as e:
+        run = await _require_run(session, run_stable_id, missing_message="run missing after env build failure")
+        run.state = AdvisoryWorkflowState.error_unrecoverable.value
+        run.error_message = _truncate_log(str(e), 4000)
+        run.completed_at = _now_utc()
+        await session.commit()
+        log.exception(
+            "workflow_unrecoverable",
+            metric_name="workflow_error_total",
+            phase="building_env",
+            workflow_run_id=str(run_stable_id),
+        )
+        await _best_effort_error_slack(
+            slack,
+            repo.slack_channel,
+            title="Environment build failed (unrecoverable)",
+            detail=_safe_exc_detail(e),
+            workflow_run_id=run_stable_id,
+            finding_id=str(finding.id),
+        )
+        return None
+
+    await _append_action_log(
+        session,
+        workflow_run_id=run_stable_id,
+        agent="env_builder",
+        tool_name="build_environment",
+        tool_inputs={"repo": repo_slug, "stack": env_result.detected_stack.value},
+        tool_output=_truncate_log(f"image={env_result.image_tag}"),
+    )
+    await session.commit()
+
+    run = await _require_run(session, run_stable_id, missing_message="run missing after env build")
+    run.state = AdvisoryWorkflowState.executing_sandbox.value
+    await session.commit()
+    log.info(
+        "workflow_state_transition",
+        metric_name="workflow_state_current",
+        from_state=AdvisoryWorkflowState.building_env.value,
+        to_state=AdvisoryWorkflowState.executing_sandbox.value,
+        workflow_run_id=str(run_stable_id),
+    )
+
+    # --- Execute PoC in sandbox ---
+    poc_content = finding.reproduction or ""
+    poc_command = ["python", "-c", poc_content] if poc_content else ["echo", "no PoC"]
+
+    try:
+        exec_result = await execute_poc(
+            image=env_result.image_tag,
+            poc_command=poc_command,
+            poc_type=PocType.RESEARCHER_SUBMITTED,
+            repo_path=env_result.repo_path,
+            container_socket=container_socket,
+        )
+    except (NotImplementedError, SandboxError) as e:
+        run = await _require_run(session, run_stable_id, missing_message="run missing after sandbox exec failure")
+        run.state = AdvisoryWorkflowState.error_sandbox.value
+        run.error_message = _truncate_log(str(e), 4000)
+        run.completed_at = _now_utc()
+        await session.commit()
+        log.warning(
+            "workflow_error",
+            metric_name="workflow_error_total",
+            phase="executing_sandbox",
+            workflow_run_id=str(run_stable_id),
+            err=str(e),
+        )
+        await _append_action_log(
+            session,
+            workflow_run_id=run_stable_id,
+            agent="sandbox_executor",
+            tool_name="execute_poc",
+            tool_inputs={"image": env_result.image_tag},
+            tool_output=str(e),
+        )
+        await session.commit()
+        await _best_effort_error_slack(
+            slack,
+            repo.slack_channel,
+            title="Sandbox execution failed",
+            detail=_safe_exc_detail(e),
+            workflow_run_id=run_stable_id,
+            finding_id=str(finding.id),
+        )
+        return None
+    except Exception as e:
+        run = await _require_run(session, run_stable_id, missing_message="run missing after sandbox exec failure")
+        run.state = AdvisoryWorkflowState.error_sandbox.value
+        run.error_message = _truncate_log(str(e), 4000)
+        run.completed_at = _now_utc()
+        await session.commit()
+        log.exception(
+            "workflow_unexpected_sandbox_error",
+            metric_name="workflow_error_total",
+            phase="executing_sandbox",
+            workflow_run_id=str(run_stable_id),
+            err=str(e),
+        )
+        await _append_action_log(
+            session,
+            workflow_run_id=run_stable_id,
+            agent="sandbox_executor",
+            tool_name="execute_poc",
+            tool_inputs={"image": env_result.image_tag},
+            tool_output=str(e),
+        )
+        await session.commit()
+        await _best_effort_error_slack(
+            slack,
+            repo.slack_channel,
+            title="Sandbox execution failed",
+            detail=_safe_exc_detail(e),
+            workflow_run_id=run_stable_id,
+            finding_id=str(finding.id),
+        )
+        return None
+
+    await _append_action_log(
+        session,
+        workflow_run_id=run_stable_id,
+        agent="sandbox_executor",
+        tool_name="execute_poc",
+        tool_inputs={
+            "image": env_result.image_tag,
+            "poc_type": exec_result.poc_type.value,
+        },
+        tool_output=_truncate_log(
+            f"tier={exec_result.confidence_tier.value} "
+            f"exit={exec_result.exit_code} "
+            f"elapsed={exec_result.elapsed_seconds:.1f}s"
+        ),
+    )
+    await session.commit()
+
+    log.info(
+        "sandbox_execution_complete",
+        metric_name="sandbox_execution_seconds",
+        duration_seconds=exec_result.elapsed_seconds,
+        confidence_tier=exec_result.confidence_tier.value,
+        workflow_run_id=str(run_stable_id),
+    )
+
+    finding.status = exec_result.confidence_tier
+    finding.poc_executed = True
+    finding.evidence = {
+        "excerpt": exec_result.evidence_excerpt,
+        "exit_code": exec_result.exit_code,
+        "elapsed_seconds": exec_result.elapsed_seconds,
+        "poc_type": exec_result.poc_type.value,
+        "timed_out": exec_result.timed_out,
+    }
+    await session.commit()
+
+    run = await _require_run(session, run_stable_id, missing_message="run missing after sandbox exec")
+    run.state = AdvisoryWorkflowState.sandbox_complete.value
+    await session.commit()
+    log.info(
+        "workflow_state_transition",
+        metric_name="workflow_state_current",
+        from_state=AdvisoryWorkflowState.executing_sandbox.value,
+        to_state=AdvisoryWorkflowState.sandbox_complete.value,
+        workflow_run_id=str(run_stable_id),
+    )
+
+    return exec_result
 
 
 async def _get_run(session: AsyncSession, run_id: uuid.UUID) -> WorkflowRun | None:

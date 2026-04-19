@@ -3,13 +3,15 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 from sqlalchemy import select
 
+from agents.env_builder import DetectedStack, EnvBuildResult
 from agents.orchestrator import AdvisoryWorkflowState, run_advisory_workflow
+from agents.sandbox_executor import ExecutionResult, PocType
 from config import GovernanceConfig, GovernanceRule, RepoConfig
 from models import AgentActionLog, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
 from tools.github import GitHubClient
@@ -78,7 +80,7 @@ def _finding_with_poc(
 
 
 @pytest.mark.asyncio
-async def test_preflight_clean_continues_to_done(db_session, mocker) -> None:
+async def test_preflight_clean_continues_to_done(db_session, mocker, tmp_path) -> None:
     repo = _repo()
 
     async def fake_triage(session, *args: object, **kwargs: object) -> Finding:
@@ -87,6 +89,29 @@ async def test_preflight_clean_continues_to_done(db_session, mocker) -> None:
         return f
 
     mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch(
+        "agents.orchestrator.build_environment",
+        new_callable=AsyncMock,
+        return_value=EnvBuildResult(
+            image_tag="sandbox:latest",
+            repo_path=tmp_path,
+            detected_stack=DetectedStack.PYTHON,
+            build_log="ok",
+        ),
+    )
+    mocker.patch(
+        "agents.orchestrator.execute_poc",
+        new_callable=AsyncMock,
+        return_value=ExecutionResult(
+            confidence_tier=FindingStatus.confirmed_low,
+            evidence_excerpt="exploit ok",
+            raw_stdout="exploit ok",
+            raw_stderr="",
+            elapsed_seconds=1.0,
+            poc_type=PocType.RESEARCHER_SUBMITTED,
+            exit_code=0,
+        ),
+    )
 
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
@@ -98,6 +123,7 @@ async def test_preflight_clean_continues_to_done(db_session, mocker) -> None:
             http,
             slack,
             ghsa_id="GHSA-TEST-ABCD-EFGH",
+            work_dir=tmp_path,
         )
 
     assert run.state == AdvisoryWorkflowState.done.value
