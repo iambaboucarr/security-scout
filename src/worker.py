@@ -11,12 +11,19 @@ import httpx
 import structlog
 from arq.connections import RedisSettings
 from arq.typing import StartupShutdown, WorkerSettingsBase
+from redis.exceptions import RedisError
 
 from agents.orchestrator import AdvisoryWorkflowParams, ScheduleRetryParams, run_advisory_workflow
 from agents.patch_oracle import run_patch_oracle_job
 from ai.anthropic_provider import create_provider
 from ai.provider import LLMProvider
-from config import Settings, configure_logging, load_app_config
+from config import (
+    AdvisoryPollInterval,
+    Settings,
+    advisory_polling_schedule_requested,
+    configure_logging,
+    load_app_config,
+)
 from db import create_engine, create_session_factory, session_scope
 from exceptions import SecurityScoutError
 from tools.advisory_polling import (
@@ -60,6 +67,44 @@ async def startup(ctx: dict[Any, Any]) -> None:
         ctx["llm"] = create_provider(settings.anthropic_api_key)
     redis = ctx.get("redis")
     ctx["rate_limiter"] = SlidingWindowRateLimiter(redis) if redis is not None else None
+
+    ctx["advisory_polling_enabled"] = False
+    if advisory_polling_schedule_requested(settings, app_config.repos):
+        if redis is None:
+            _LOG.error(
+                "advisory_polling_startup_gate_failed",
+                reason="redis_client_missing",
+                metric_name="advisory_polling_startup_gate_total",
+                result="fail",
+            )
+        else:
+            try:
+                await redis.ping()
+            except RedisError:
+                _LOG.exception(
+                    "advisory_polling_startup_gate_failed",
+                    reason="redis_ping_failed",
+                    metric_name="advisory_polling_startup_gate_total",
+                    result="fail",
+                )
+            else:
+                ctx["advisory_polling_enabled"] = True
+                _LOG.info(
+                    "advisory_polling_startup_gate_passed",
+                    metric_name="advisory_polling_startup_gate_total",
+                    result="ok",
+                    interval=settings.advisory_poll_interval.value,
+                )
+    elif settings.advisory_poll_interval != AdvisoryPollInterval.disabled and not any(
+        r.advisory_poll_states for r in app_config.repos.repos
+    ):
+        _LOG.warning(
+            "advisory_polling_startup_gate_failed",
+            reason="no_repos_with_poll_states",
+            metric_name="advisory_polling_startup_gate_total",
+            result="fail",
+            interval=settings.advisory_poll_interval.value,
+        )
 
 
 async def shutdown(ctx: dict[Any, Any]) -> None:

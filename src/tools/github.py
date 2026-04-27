@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from typing import Any, Literal, Self, cast
 from urllib.parse import parse_qs, urlparse
@@ -405,18 +405,22 @@ class GitHubClient:
         params: dict[str, str | int] | None = None,
         finding_id: str | None = None,
         workflow_run_id: uuid.UUID | str | None = None,
+        etag: str | None = None,
     ) -> httpx.Response:
         client = self._client_or_raise()
+        extra: dict[str, str] = {}
+        if etag:
+            extra["If-None-Match"] = etag
         if self._owns_client:
-            response = await client.request(method, path, params=params)
+            response = await client.request(method, path, params=params, headers=extra or None)
         else:
-            response = await client.request(
-                method,
-                path,
-                params=params,
-                headers=_auth_headers(self._cfg.token, self._cfg.api_version),
-            )
+            hdrs = _auth_headers(self._cfg.token, self._cfg.api_version)
+            if extra:
+                hdrs = {**hdrs, **extra}
+            response = await client.request(method, path, params=params, headers=hdrs)
         if response.is_success:
+            return response
+        if response.status_code == 304 and etag:
             return response
         err = GitHubAPIError.from_httpx_response(
             response,
@@ -502,6 +506,9 @@ class GitHubClient:
         max_pages: int = 20,
         finding_id: str | None = None,
         workflow_run_id: uuid.UUID | str | None = None,
+        first_page_if_none_match: str | None = None,
+        on_first_page_not_modified: Callable[[], Awaitable[None]] | None = None,
+        on_first_page_etag: Callable[[str], Awaitable[None]] | None = None,
     ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
         """Yield one page of repository security advisories (cursor-paginated)."""
         o = validate_github_repo_owner(owner)
@@ -524,18 +531,29 @@ class GitHubClient:
             params["severity"] = severity
 
         for _ in range(max_pages):
+            first = "after" not in params
+            inm = first_page_if_none_match if first else None
             response = await self._request(
                 "GET",
                 path,
                 params=params,
                 finding_id=finding_id,
                 workflow_run_id=workflow_run_id,
+                etag=inm,
             )
+            if response.status_code == 304:
+                if on_first_page_not_modified is not None:
+                    await on_first_page_not_modified()
+                return
             batch = _as_json_array(
                 response,
                 finding_id=finding_id,
                 workflow_run_id=workflow_run_id,
             )
+            if first and on_first_page_etag is not None:
+                et = response.headers.get("etag")
+                if isinstance(et, str) and et.strip():
+                    await on_first_page_etag(et.strip())
             page: list[AdvisoryData] = []
             for item in batch:
                 if not isinstance(item, dict):

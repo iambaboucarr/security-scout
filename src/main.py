@@ -158,6 +158,7 @@ def create_app() -> FastAPI:
                 ghsa_id=ghsa_id,
                 advisory_source=advisory_source,
                 resume_workflow_run_id=resume_workflow_run_id,
+                poll_interval_seconds=settings.advisory_poll_interval_seconds_for_dedup(),
             )
 
         app.state.enqueue_advisory = enqueue_advisory

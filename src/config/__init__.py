@@ -26,6 +26,24 @@ class RepoMode(StrEnum):
     enforce = "enforce"
 
 
+class AdvisoryPollInterval(StrEnum):
+    disabled = "disabled"
+    every_5_min = "every_5_min"
+    every_15_min = "every_15_min"
+    hourly = "hourly"
+    every_4_hours = "every_4_hours"
+    daily = "daily"
+
+
+_ADVISORY_POLL_INTERVAL_SECONDS: dict[AdvisoryPollInterval, int] = {
+    AdvisoryPollInterval.every_5_min: 300,
+    AdvisoryPollInterval.every_15_min: 900,
+    AdvisoryPollInterval.hourly: 3600,
+    AdvisoryPollInterval.every_4_hours: 14_400,
+    AdvisoryPollInterval.daily: 86_400,
+}
+
+
 class RateLimits(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -130,8 +148,8 @@ class RepoConfig(BaseModel):
     governance: GovernanceConfig | None = None
     # Notified by the interactive Slack approval handler on escalation.
     approvers: list[GovernanceApprover] = Field(default_factory=list)
-    # Advisory list polling: empty list = no sync for this repo. Validated: never ``closed``.
-    advisory_poll_states: list[str] = Field(default_factory=list)
+    # Override with [] to disable REST polling for this repo. Validated: never ``closed``.
+    advisory_poll_states: list[str] = Field(default_factory=lambda: ["triage"])
     advisory_poll_max_enqueues_per_tick: int = Field(default=25, ge=0)
     advisory_poll_max_pages: int = Field(default=5, ge=1)
     advisory_poll_per_page: int = Field(default=100, ge=1, le=100)
@@ -247,8 +265,15 @@ class Settings(BaseSettings):
     # Advisory list polling: caps and shared sliding-window for ``advisory_poll`` (sync job only).
     advisory_poll_max_enqueues_per_tick_global: int = Field(default=100, ge=0)
     advisory_poll_rate_per_hour: int = Field(default=500, ge=1)
-    # Optional: poll interval in seconds, used for Redis dedup TTL in ``try_enqueue_advisory`` when set.
-    advisory_poll_interval_seconds: int | None = None
+    # Preset cadence for scheduled repository-advisory sync; ``disabled`` = no schedule.
+    # When turning polling on, ``hourly`` is a sensible first choice.
+    advisory_poll_interval: AdvisoryPollInterval = Field(default=AdvisoryPollInterval.disabled)
+
+    def advisory_poll_interval_seconds_for_dedup(self) -> int | None:
+        """Seconds for Redis advisory dedupe TTL; ``None`` when polling is disabled (min TTL applies)."""
+        if self.advisory_poll_interval == AdvisoryPollInterval.disabled:
+            return None
+        return _ADVISORY_POLL_INTERVAL_SECONDS[self.advisory_poll_interval]
 
     @model_validator(mode="after")
     def _reject_dev_placeholders_in_production(self) -> Self:
@@ -304,6 +329,13 @@ def load_repos_manifest(path: Path) -> tuple[ReposManifest, str]:
     payload = _coerce_manifest_payload(data)
     manifest = ReposManifest.model_validate(payload)
     return manifest, digest
+
+
+def advisory_polling_schedule_requested(settings: Settings, repos: ReposManifest) -> bool:
+    """True when the operator chose a non-disabled interval and at least one repo enables poll states."""
+    if settings.advisory_poll_interval == AdvisoryPollInterval.disabled:
+        return False
+    return any(repo.advisory_poll_states for repo in repos.repos)
 
 
 def load_app_config(settings: Settings | None = None) -> AppConfig:

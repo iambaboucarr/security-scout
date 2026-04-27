@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from redis.exceptions import RedisError
 
 from db import session_scope
 from models import (
@@ -73,6 +74,7 @@ async def test_startup_shutdown_roundtrip(tmp_path: Path, monkeypatch: pytest.Mo
     assert "session_factory" in ctx
     assert ctx["llm"] is None
     assert isinstance(ctx["http_client"], httpx.AsyncClient)
+    assert ctx["advisory_polling_enabled"] is False
 
     await shutdown(ctx)
 
@@ -578,5 +580,110 @@ async def test_startup_sets_llm_provider_when_api_key_present(
     await startup(ctx)
     try:
         assert ctx["llm"] is not None
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_startup_advisory_polling_enabled_when_redis_pings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'w.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    redis = AsyncMock()
+    redis.ping = AsyncMock(return_value=True)
+    ctx: dict[str, Any] = {"redis": redis}
+    await startup(ctx)
+    try:
+        assert ctx["advisory_polling_enabled"] is True
+        redis.ping.assert_awaited_once()
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_startup_advisory_polling_disabled_when_redis_ping_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'w.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    redis = AsyncMock()
+    redis.ping = AsyncMock(side_effect=RedisError("nop"))
+    ctx: dict[str, Any] = {"redis": redis}
+    await startup(ctx)
+    try:
+        assert ctx["advisory_polling_enabled"] is False
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_startup_advisory_polling_disabled_when_no_poll_states_but_interval_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n"
+        "    advisory_poll_states: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'w.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    redis = AsyncMock()
+    redis.ping = AsyncMock(return_value=True)
+    ctx: dict[str, Any] = {"redis": redis}
+    await startup(ctx)
+    try:
+        assert ctx["advisory_polling_enabled"] is False
+        redis.ping.assert_not_called()
     finally:
         await shutdown(ctx)

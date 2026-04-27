@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from arq.connections import ArqRedis as _ArqRedis
 from fakeredis import FakeAsyncRedis
 
-from config import AppConfig, RepoConfig, ReposManifest, Settings
+from config import AdvisoryPollInterval, AppConfig, RepoConfig, ReposManifest, Settings
 from exceptions import SecurityScoutError
 from tools.advisory_polling import (
     _GlobalEnqueueBudget,
     _parse_watermark_value,
     _watermark_iso_utc,
+    advisory_list_etag_key,
     advisory_list_watermark_key,
     run_repository_advisories_sync,
     run_repository_advisories_sync_from_worker_ctx,
@@ -24,8 +28,19 @@ from tools.scm.models import AdvisoryData
 _GH = "GHSA-ABCD-ABCD-ABCD"
 
 
+@contextlib.contextmanager
+def _patch_arq_redis_allows_fakeredis() -> Iterator[None]:
+    """`run_repository_advisories_sync_from_worker_ctx` uses ``isinstance(redis, ArqRedis)``; fakeredis is a ``Redis``."""
+    with patch("tools.advisory_polling.ArqRedis", (_ArqRedis, FakeAsyncRedis)):
+        yield
+
+
 def test_advisory_list_watermark_key() -> None:
     assert advisory_list_watermark_key(repo_slug="acme/p", state="Triage") == "poll:advisory:wm:acme/p:triage"
+
+
+def test_advisory_list_etag_key() -> None:
+    assert advisory_list_etag_key(repo_slug="acme/p", state="Triage") == "etag:advisory:acme/p:triage"
 
 
 def test_watermark_round_trip() -> None:
@@ -80,6 +95,7 @@ def _minimal_empty_poll_app() -> AppConfig:
         allowed_workflows=[],
         notify_on_severity=[],
         require_approval_for=[],
+        advisory_poll_states=[],
     )
     return AppConfig(
         settings=Settings(),
@@ -151,8 +167,18 @@ def _app_with_triage_poll(*, seed_without_enqueue: bool = False) -> AppConfig:
 
 
 class _FakeScm:
-    def __init__(self, pages: list[tuple[AdvisoryData, ...]]) -> None:
+    def __init__(
+        self,
+        pages: list[tuple[AdvisoryData, ...]],
+        *,
+        emit_list_etag_before_first_page: str | None = None,
+        not_modified_first: bool = False,
+        not_modified_only_if_conditional: bool = False,
+    ) -> None:
         self._pages = pages
+        self._emit_list_etag = emit_list_etag_before_first_page
+        self._not_modified_first = not_modified_first
+        self._not_modified_only_if_conditional = not_modified_only_if_conditional
 
     async def __aenter__(self) -> _FakeScm:
         return self
@@ -170,12 +196,88 @@ class _FakeScm:
         max_pages: int = 20,
         finding_id: str | None = None,
         workflow_run_id: object = None,
+        **kwargs: object,
     ) -> object:
+        poll_nm = kwargs.get("poll_on_first_page_not_modified")
+        poll_etag = kwargs.get("poll_on_first_page_etag")
+
         async def gen() -> object:
-            for p in self._pages:
+            poll_first = kwargs.get("poll_first_page_if_none_match")
+            if self._not_modified_only_if_conditional and poll_first:
+                if poll_nm is not None:
+                    await poll_nm()
+                return
+            if self._not_modified_first:
+                if poll_nm is not None:
+                    await poll_nm()
+                return
+            for i, p in enumerate(self._pages):
+                if i == 0 and self._emit_list_etag is not None and poll_etag is not None:
+                    await poll_etag(self._emit_list_etag)
                 yield p
 
         return gen()
+
+
+@pytest.mark.asyncio
+async def test_sync_persists_list_etag_in_redis_with_ttl() -> None:
+    r = FakeAsyncRedis()
+    rate_limiter = SlidingWindowRateLimiter(r)
+    adv = AdvisoryData(
+        ghsa_id=_GH,
+        source="repository",
+        summary="s",
+        description="d",
+        updated_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    app = _app_with_triage_poll()
+    with (
+        patch(
+            "tools.advisory_polling.GitHubSCMProvider",
+            return_value=_FakeScm([(adv,)], emit_list_etag_before_first_page='"e1"'),
+        ),
+        patch("tools.advisory_polling.try_enqueue_advisory", new_callable=AsyncMock) as tq,
+    ):
+        tq.return_value = "job-1"
+        await run_repository_advisories_sync(
+            settings=app.settings,
+            app_config=app,
+            redis=r,
+            rate_limiter=rate_limiter,
+        )
+    stored = await r.get("etag:advisory:acme/rr:triage")
+    assert stored is not None
+    assert stored.decode() == '"e1"'
+    ttl = await r.ttl("etag:advisory:acme/rr:triage")
+    assert ttl > 0
+
+
+@pytest.mark.asyncio
+async def test_sync_not_modified_short_circuits_without_enqueue() -> None:
+    r = FakeAsyncRedis()
+    rate_limiter = SlidingWindowRateLimiter(r)
+    app = _app_with_triage_poll()
+    with (
+        patch(
+            "tools.advisory_polling.GitHubSCMProvider",
+            return_value=_FakeScm([], not_modified_first=True),
+        ),
+        patch("tools.advisory_polling.try_enqueue_advisory", new_callable=AsyncMock) as tq,
+        patch("tools.advisory_polling._LOG") as mlog,
+    ):
+        await run_repository_advisories_sync(
+            settings=app.settings,
+            app_config=app,
+            redis=r,
+            rate_limiter=rate_limiter,
+        )
+    tq.assert_not_awaited()
+    mlog.info.assert_any_call(
+        "advisory_poll_etag_not_modified",
+        metric_name="advisory_poll_etag_hits_total",
+        repo="r",
+        state="triage",
+    )
 
 
 @pytest.mark.asyncio
@@ -232,6 +334,42 @@ async def test_sync_seed_only_sets_watermark() -> None:
     tq.assert_not_awaited()
     wm = await r.get("poll:advisory:wm:acme/rr:triage")
     assert wm is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_seed_deletes_stale_etag_on_304_then_sets_watermark() -> None:
+    r = FakeAsyncRedis()
+    await r.set("etag:advisory:acme/rr:triage", b'"stale"')
+    rate_limiter = SlidingWindowRateLimiter(r)
+    adv = AdvisoryData(
+        ghsa_id=_GH,
+        source="repository",
+        summary="s",
+        description="d",
+        updated_at=datetime(2024, 3, 1, tzinfo=UTC),
+    )
+    app = _app_with_triage_poll(seed_without_enqueue=True)
+    with (
+        patch(
+            "tools.advisory_polling.GitHubSCMProvider",
+            return_value=_FakeScm(
+                pages=[(adv,)],
+                not_modified_only_if_conditional=True,
+                emit_list_etag_before_first_page='"new"',
+            ),
+        ),
+        patch("tools.advisory_polling.try_enqueue_advisory", new_callable=AsyncMock) as tq,
+    ):
+        await run_repository_advisories_sync(
+            settings=app.settings,
+            app_config=app,
+            redis=r,
+            rate_limiter=rate_limiter,
+        )
+    tq.assert_not_awaited()
+    wm = await r.get("poll:advisory:wm:acme/rr:triage")
+    assert wm is not None
+    assert await r.get("etag:advisory:acme/rr:triage") == b'"new"'
 
 
 @pytest.mark.asyncio
@@ -307,7 +445,10 @@ async def test_run_sync_from_worker_ctx_invokes_sync() -> None:
         "redis": r,
         "rate_limiter": rl,
     }
-    with patch("tools.advisory_polling.GitHubSCMProvider"):
+    with (
+        _patch_arq_redis_allows_fakeredis(),
+        patch("tools.advisory_polling.GitHubSCMProvider"),
+    ):
         await run_repository_advisories_sync_from_worker_ctx(ctx)
 
 
@@ -334,3 +475,52 @@ async def test_run_sync_from_worker_ctx_rejects_non_arq_redis() -> None:
         )
     mlog.error.assert_called()
     rsync.assert_not_called()
+
+
+def _settings_with_secrets(*, interval: AdvisoryPollInterval = AdvisoryPollInterval.disabled) -> Settings:
+    return Settings(
+        github_webhook_secret="a",
+        github_pat="b",
+        slack_bot_token="c",
+        slack_signing_secret="d",
+        advisory_poll_interval=interval,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_sync_from_worker_ctx_skips_when_interval_set_but_polling_not_enabled() -> None:
+    with (
+        _patch_arq_redis_allows_fakeredis(),
+        patch("tools.advisory_polling._LOG") as mlog,
+        patch("tools.advisory_polling.run_repository_advisories_sync") as rsync,
+    ):
+        r = FakeAsyncRedis()
+        await run_repository_advisories_sync_from_worker_ctx(
+            {
+                "settings": _settings_with_secrets(interval=AdvisoryPollInterval.hourly),
+                "app_config": _minimal_empty_poll_app(),
+                "redis": r,
+                "rate_limiter": SlidingWindowRateLimiter(r),
+            }
+        )
+    rsync.assert_not_called()
+    mlog.warning.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_sync_from_worker_ctx_invokes_sync_when_interval_set_and_polling_enabled() -> None:
+    with (
+        _patch_arq_redis_allows_fakeredis(),
+        patch("tools.advisory_polling.run_repository_advisories_sync", new_callable=AsyncMock) as rsync,
+    ):
+        r = FakeAsyncRedis()
+        await run_repository_advisories_sync_from_worker_ctx(
+            {
+                "settings": _settings_with_secrets(interval=AdvisoryPollInterval.hourly),
+                "app_config": _minimal_empty_poll_app(),
+                "redis": r,
+                "rate_limiter": SlidingWindowRateLimiter(r),
+                "advisory_polling_enabled": True,
+            }
+        )
+    rsync.assert_awaited_once()

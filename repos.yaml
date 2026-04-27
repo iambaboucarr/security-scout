@@ -14,6 +14,8 @@ repos:
     issue_trackers: []
     dedup_semantic_search: false
     accepted_risk_ttl_days: 90
+    # REST poll for repo advisories (e.g. triage state). Default: [triage]. Use [] to disable for this repo.
+    # advisory_poll_states: []
     # Tiered governance. Omit to keep strict approval for every
     # finding above informational. Precedence: approve > notify > auto_resolve.
     # governance:
