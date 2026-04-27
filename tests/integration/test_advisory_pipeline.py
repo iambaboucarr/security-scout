@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -82,6 +83,7 @@ class _ImmediateRedisPool:
     def __init__(self, holder: dict[str, Any]) -> None:
         self._holder = holder
         self._dedup_keys: dict[str, str] = {}
+        self._set_nx_lock = asyncio.Lock()
 
     async def set(
         self,
@@ -91,10 +93,11 @@ class _ImmediateRedisPool:
         nx: bool = False,
         ex: int | None = None,
     ) -> bool | None:
-        if nx and key in self._dedup_keys:
-            return None
-        self._dedup_keys[key] = value
-        return True
+        async with self._set_nx_lock:
+            if nx and key in self._dedup_keys:
+                return None
+            self._dedup_keys[key] = value
+            return True
 
     async def close(self) -> None:
         return None
@@ -209,3 +212,60 @@ async def test_webhook_enqueues_worker_writes_db_and_slack_mocked(
 
     assert any(f"/repos/acme/app/security-advisories/{_GHSA}" in p for p in http_paths)
     assert any(p.endswith("/chat.postMessage") for p in http_paths)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_enqueue_advisory_produces_single_workflow_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport, _http_paths = _mock_transport()
+    real = httpx.AsyncClient
+
+    def _client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        if kwargs.get("transport") is None:
+            kwargs["transport"] = transport
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _client)
+
+    db_file = tmp_path / "scout-race.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_file}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(_manifest(tmp_path)))
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "whsec-test")
+    monkeypatch.setenv("GITHUB_PAT", "ghp-test-token")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "signing")
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    holder: dict[str, Any] = {}
+
+    async def _fake_create_pool(_rs: object) -> _ImmediateRedisPool:
+        return _ImmediateRedisPool(holder)
+
+    monkeypatch.setattr("main.create_pool", _fake_create_pool)
+
+    from main import create_app
+
+    app = create_app()
+    worker_http = httpx.AsyncClient(transport=transport, timeout=30.0)
+    try:
+        with TestClient(app) as client:
+            st = client.app.state
+            holder["ctx"] = {
+                "settings": st.settings,
+                "app_config": st.app_config,
+                "engine": st.engine,
+                "session_factory": st.session_factory,
+                "http_client": worker_http,
+                "llm": None,
+                "redis": _FakeRedis(),
+            }
+            enq = st.enqueue_advisory
+            await asyncio.gather(*[enq(repo_name="demo", ghsa_id=_GHSA) for _ in range(40)])
+            async with session_scope(st.session_factory) as session:
+                runs = (await session.execute(select(WorkflowRun))).scalars().all()
+                assert len(runs) == 1
+    finally:
+        await worker_http.aclose()

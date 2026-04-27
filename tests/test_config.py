@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from config import (
+    AdvisoryPollInterval,
     AppConfig,
     GovernanceConfig,
     GovernanceRule,
@@ -12,6 +13,9 @@ from config import (
     RepoMode,
     ReposManifest,
     Settings,
+    advisory_poll_cron_minute_and_hour,
+    advisory_poll_interval_from_env,
+    advisory_polling_schedule_requested,
     compute_repos_yaml_sha256,
     configure_logging,
     load_app_config,
@@ -331,6 +335,123 @@ def test_repo_config_accepted_risk_ttl_defaults_to_90() -> None:
     )
     assert repo.accepted_risk_ttl_days == 90
     assert repo.default_git_ref == "main"
+    assert repo.advisory_poll_states == ["triage"]
+
+
+def test_repo_config_advisory_poll_states_explicit_empty() -> None:
+    repo = RepoConfig(
+        name="svc",
+        github_org="o",
+        github_repo="r",
+        slack_channel="#c",
+        allowed_workflows=[],
+        notify_on_severity=["high"],
+        require_approval_for=["high"],
+        advisory_poll_states=[],
+    )
+    assert repo.advisory_poll_states == []
+
+
+def test_settings_advisory_poll_interval_default_disabled() -> None:
+    s = Settings(
+        github_webhook_secret="a",
+        github_pat="b",
+        slack_bot_token="c",
+        slack_signing_secret="d",
+    )
+    assert s.advisory_poll_interval is AdvisoryPollInterval.disabled
+    assert s.advisory_poll_interval_seconds_for_dedup() is None
+
+
+def test_settings_advisory_poll_interval_seconds_for_dedup() -> None:
+    s = Settings(
+        github_webhook_secret="a",
+        github_pat="b",
+        slack_bot_token="c",
+        slack_signing_secret="d",
+        advisory_poll_interval=AdvisoryPollInterval.hourly,
+    )
+    assert s.advisory_poll_interval_seconds_for_dedup() == 3600
+
+
+def test_advisory_polling_schedule_requested() -> None:
+    s_off = Settings(
+        github_webhook_secret="a",
+        github_pat="b",
+        slack_bot_token="c",
+        slack_signing_secret="d",
+    )
+    s_on = Settings(
+        github_webhook_secret="a",
+        github_pat="b",
+        slack_bot_token="c",
+        slack_signing_secret="d",
+        advisory_poll_interval=AdvisoryPollInterval.hourly,
+    )
+    repos_empty = ReposManifest(repos=[])
+    repo = RepoConfig(
+        name="svc",
+        github_org="o",
+        github_repo="r",
+        slack_channel="#c",
+        allowed_workflows=[],
+        notify_on_severity=["high"],
+        require_approval_for=["high"],
+        advisory_poll_states=[],
+    )
+    repos_one = ReposManifest(repos=[repo])
+    repo_poll = RepoConfig(
+        name="svc",
+        github_org="o",
+        github_repo="r",
+        slack_channel="#c",
+        allowed_workflows=[],
+        notify_on_severity=["high"],
+        require_approval_for=["high"],
+        advisory_poll_states=["triage"],
+    )
+    assert advisory_polling_schedule_requested(s_off, repos_one) is False
+    assert advisory_polling_schedule_requested(s_on, repos_empty) is False
+    assert advisory_polling_schedule_requested(s_on, ReposManifest(repos=[repo])) is False
+    assert advisory_polling_schedule_requested(s_on, ReposManifest(repos=[repo_poll])) is True
+    repo_default_poll = RepoConfig(
+        name="svc2",
+        github_org="o",
+        github_repo="r2",
+        slack_channel="#c",
+        allowed_workflows=[],
+        notify_on_severity=["high"],
+        require_approval_for=["high"],
+    )
+    assert repo_default_poll.advisory_poll_states == ["triage"]
+    assert advisory_polling_schedule_requested(s_on, ReposManifest(repos=[repo_default_poll])) is True
+
+
+def test_advisory_poll_cron_minute_and_hour_mapping() -> None:
+    assert advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.disabled) is None
+    m5 = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.every_5_min)
+    assert m5 is not None
+    assert m5[0] == set(range(0, 60, 5))
+    assert m5[1] is None
+    m15 = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.every_15_min)
+    assert m15 == ({0, 15, 30, 45}, None)
+    h = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.hourly)
+    assert h == (0, None)
+    h4 = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.every_4_hours)
+    assert h4 == (0, {0, 4, 8, 12, 16, 20})
+    d = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.daily)
+    assert d == (0, 0)
+
+
+def test_advisory_poll_interval_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ADVISORY_POLL_INTERVAL", raising=False)
+    assert advisory_poll_interval_from_env() is AdvisoryPollInterval.disabled
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+    assert advisory_poll_interval_from_env() is AdvisoryPollInterval.hourly
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "not_a_preset")
+    assert advisory_poll_interval_from_env() is AdvisoryPollInterval.disabled
 
 
 def test_repo_config_default_git_ref_can_be_master() -> None:
@@ -368,7 +489,9 @@ def test_settings_tracker_credentials_default_none() -> None:
     assert s.linear_api_key is None
 
 
-def test_settings_reads_secrets_from_directory(tmp_path: Path) -> None:
+def test_settings_reads_secrets_from_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("GITHUB_PAT", "SLACK_BOT_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
     (tmp_path / "github_pat").write_text("ghp_secret_from_file", encoding="utf-8")
     (tmp_path / "slack_bot_token").write_text("xoxb-from-file", encoding="utf-8")
     s = Settings(

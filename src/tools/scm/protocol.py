@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
@@ -49,6 +50,24 @@ class SCMProvider(Protocol):
         workflow_run_id: uuid.UUID | str | None = None,
     ) -> tuple[AdvisoryData, ...]:
         """List all security advisories for a repository."""
+        ...
+
+    def iter_list_advisories(
+        self,
+        repo: str,
+        *,
+        state: str | None = None,
+        severity: str | None = None,
+        per_page: int = 30,
+        max_pages: int = 20,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | str | None = None,
+        poll_first_page_if_none_match: str | None = None,
+        poll_on_first_page_not_modified: Callable[[], Awaitable[None]] | None = None,
+        poll_on_first_page_etag: Callable[[str], Awaitable[None]] | None = None,
+        poll_on_list_page_response: Callable[[object], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
+        """Stream repository security advisories page by page (async generator; use ``async for``)."""
         ...
 
     async def fetch_code_scanning_alerts(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal
 
@@ -83,6 +84,25 @@ def test_scm_provider_protocol_accepts_full_custom_implementation() -> None:
             _finding_id: str | None = None,
             _workflow_run_id: uuid.UUID | str | None = None,
         ) -> tuple[AdvisoryData, ...]:
+            raise NotImplementedError
+
+        async def iter_list_advisories(
+            self,
+            _repo: str,
+            *,
+            _state: str | None = None,
+            _severity: str | None = None,
+            _per_page: int = 30,
+            _max_pages: int = 20,
+            _finding_id: str | None = None,
+            _workflow_run_id: uuid.UUID | str | None = None,
+            _poll_first_page_if_none_match: str | None = None,
+            _poll_on_first_page_not_modified: object = None,
+            _poll_on_first_page_etag: object = None,
+            _poll_on_list_page_response: object = None,
+        ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
+            if False:  # pragma: no cover
+                yield ()  # type: ignore[unreachable]
             raise NotImplementedError
 
         async def fetch_code_scanning_alerts(
@@ -174,6 +194,7 @@ def test_scm_provider_protocol_surface_has_expected_methods() -> None:
     expected = {
         "fetch_advisory",
         "list_advisories",
+        "iter_list_advisories",
         "fetch_code_scanning_alerts",
         "fetch_pr_diff",
         "post_pr_comment",

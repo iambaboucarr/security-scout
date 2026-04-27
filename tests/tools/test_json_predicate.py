@@ -5,9 +5,10 @@ import os
 import uuid
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import JSON, String, column, delete, func, or_, select, table
 from sqlalchemy.dialects import postgresql, sqlite
-from sqlalchemy.exc import CompileError
+from sqlalchemy.exc import CompileError, IntegrityError
 
 from db import create_engine, create_session_factory
 from models import Base, Finding, FindingStatus, Severity, WorkflowKind
@@ -172,6 +173,121 @@ async def test_json_text_at_postgres_finding_table() -> None:
             r2 = await session.execute(select(Finding.id).where(or_(ge, gs)))
             assert r2.scalar_one() == fid2
             await session.execute(delete(Finding).where(Finding.id == fid2))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_allows_duplicate_advisory_ghsa_without_partial_index(db_session) -> None:
+    ghsa = "GHSA-DUP1-DUP1-DUP1"
+    for _ in range(2):
+        db_session.add(
+            Finding(
+                id=uuid.uuid4(),
+                workflow=WorkflowKind.advisory,
+                repo_name="o/r",
+                source_ref="https://example.com/a",
+                severity=Severity.high,
+                title="t",
+                status=FindingStatus.unconfirmed,
+                evidence={"ghsa_id": ghsa},
+            ),
+        )
+    await db_session.commit()
+    r = await db_session.execute(select(func.count()).select_from(Finding))
+    assert r.scalar_one() == 2
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_postgres_partial_unique_index_rejects_duplicate_advisory_ghsa() -> None:
+    url = _require_postgres_url()
+    engine = create_engine(url)
+    ghsa = "GHSA-PGUX-PGUX-PGUX"
+    fid1 = uuid.uuid4()
+    fid2 = uuid.uuid4()
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(
+                sa.text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_advisory_ghsa
+                    ON findings (repo_name, (evidence->>'ghsa_id'))
+                    WHERE workflow = 'advisory'
+                    """,
+                ),
+            )
+        factory = create_session_factory(engine)
+        async with factory() as session:
+            session.add(
+                Finding(
+                    id=fid1,
+                    workflow=WorkflowKind.advisory,
+                    repo_name="o/r",
+                    source_ref="https://example.com/a",
+                    severity=Severity.high,
+                    title="t",
+                    status=FindingStatus.unconfirmed,
+                    evidence={"ghsa_id": ghsa},
+                ),
+            )
+            await session.commit()
+        async with factory() as session:
+            session.add(
+                Finding(
+                    id=fid2,
+                    workflow=WorkflowKind.advisory,
+                    repo_name="o/r",
+                    source_ref="https://example.com/b",
+                    severity=Severity.high,
+                    title="t2",
+                    status=FindingStatus.unconfirmed,
+                    evidence={"ghsa_id": ghsa},
+                ),
+            )
+            with pytest.raises(IntegrityError):
+                await session.commit()
+            await session.rollback()
+        async with factory() as session:
+            await session.execute(delete(Finding).where(Finding.id == fid1))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_json_predicate_select_parity_postgres_matches_sqlite_semantics() -> None:
+    """Application predicate uses ``upper(trim(json_extract / ->>))``; unique index is raw ``->>``."""
+    url = _require_postgres_url()
+    engine = create_engine(url)
+    ghsa = "GHSA-PAR1-PAR1-PAR1"
+    fid = uuid.uuid4()
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = create_session_factory(engine)
+        async with factory() as session:
+            session.add(
+                Finding(
+                    id=fid,
+                    workflow=WorkflowKind.advisory,
+                    repo_name="o/r",
+                    source_ref="https://example.com/z",
+                    severity=Severity.high,
+                    title="t",
+                    status=FindingStatus.unconfirmed,
+                    evidence={"ghsa_id": f"  {ghsa}  "},
+                ),
+            )
+            await session.commit()
+        async with factory() as session:
+            ge = json_text_at_upper_trimmed(Finding.evidence, "ghsa_id") == ghsa
+            r = await session.execute(select(Finding.id).where(ge))
+            assert r.scalar_one() == fid
+            await session.execute(delete(Finding).where(Finding.id == fid))
             await session.commit()
     finally:
         await engine.dispose()

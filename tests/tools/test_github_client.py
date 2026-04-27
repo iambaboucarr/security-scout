@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -515,6 +516,157 @@ async def test_list_repository_security_advisories_api_error() -> None:
             await gh.list_repository_security_advisories("acme", "app")
 
     assert exc.value.http_status == 403
+
+
+@pytest.mark.asyncio
+async def test_iter_repository_security_advisories_sends_if_none_match_first_page_only() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        inm = request.headers.get("if-none-match")
+        if "after=" not in str(request.url):
+            assert inm == '"v1"'
+            link = '<https://api.github.com/repos/acme/app/security-advisories?after=c1>; rel="next"'
+            return httpx.Response(
+                200,
+                json=[{"ghsa_id": "GHSA-0001-AAAA-BBBB", "summary": "a", "description": ""}],
+                headers={"etag": '"v2"', "link": link},
+            )
+        assert inm is None
+        return httpx.Response(200, json=[])
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        out: list[tuple[AdvisoryData, ...]] = []
+        async for page in gh.iter_repository_security_advisories(
+            "acme", "app", per_page=1, max_pages=2, first_page_if_none_match='"v1"'
+        ):
+            out.append(page)
+    assert len(calls) == 2
+    assert len(out) == 2
+
+
+@pytest.mark.asyncio
+async def test_iter_repository_security_advisories_304_stops_without_second_request() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert calls == 1
+        return httpx.Response(304)
+
+    on_nm = AsyncMock()
+    et_saved: list[str] = []
+
+    async def on_etag(e: str) -> None:
+        et_saved.append(e)
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        pages: list[tuple[AdvisoryData, ...]] = []
+        async for page in gh.iter_repository_security_advisories(
+            "acme",
+            "app",
+            per_page=10,
+            max_pages=5,
+            first_page_if_none_match='"old"',
+            on_first_page_not_modified=on_nm,
+            on_first_page_etag=on_etag,
+        ):
+            pages.append(page)
+    assert pages == []
+    on_nm.assert_awaited_once()
+    assert et_saved == []
+
+
+@pytest.mark.asyncio
+async def test_iter_repository_security_advisories_invokes_etag_callback_on_200() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[{"ghsa_id": "GHSA-0001-AAAA-BBBB", "summary": "a", "description": ""}],
+            headers={"etag": '"abc"'},
+        )
+
+    saved: list[str] = []
+
+    async def on_etag(e: str) -> None:
+        saved.append(e)
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        async for _page in gh.iter_repository_security_advisories("acme", "app", on_first_page_etag=on_etag):
+            pass
+    assert saved == ['"abc"']
+
+
+@pytest.mark.asyncio
+async def test_iter_repository_security_advisories_invokes_on_list_page_response() -> None:
+    seen: list[int] = []
+
+    async def on_list(resp: httpx.Response) -> None:
+        seen.append(resp.status_code)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[{"ghsa_id": "GHSA-0001-AAAA-BBBB", "summary": "a", "description": ""}],
+            headers={"etag": '"abc"', "x-ratelimit-remaining": "4999"},
+        )
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        async for _page in gh.iter_repository_security_advisories(
+            "acme",
+            "app",
+            on_first_page_etag=AsyncMock(),
+            on_list_page_response=on_list,
+        ):
+            pass
+    assert seen == [200]
+
+
+@pytest.mark.asyncio
+async def test_iter_repository_security_advisories_on_list_page_response_304() -> None:
+    seen: list[int] = []
+
+    async def on_list(resp: httpx.Response) -> None:
+        seen.append(resp.status_code)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(304, headers={"x-ratelimit-remaining": "4998"})
+
+    on_nm = AsyncMock()
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        async for _page in gh.iter_repository_security_advisories(
+            "acme",
+            "app",
+            per_page=10,
+            max_pages=5,
+            first_page_if_none_match='"old"',
+            on_first_page_not_modified=on_nm,
+            on_list_page_response=on_list,
+        ):
+            pass
+    assert seen == [304]
+    on_nm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_iter_repository_security_advisories_304_without_if_none_match_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(304)
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        with pytest.raises(GitHubAPIError) as exc:
+            async for _page in gh.iter_repository_security_advisories("acme", "app"):
+                pass
+    assert exc.value.http_status == 304
 
 
 @pytest.mark.asyncio

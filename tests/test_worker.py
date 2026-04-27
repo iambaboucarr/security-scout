@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from redis.exceptions import RedisError
 
 from db import session_scope
 from models import (
@@ -20,7 +22,9 @@ from models import (
 from tools.slack import SlackAPIError
 from worker import (
     WorkerSettings,
+    _advisory_sync_cron_jobs,
     _patch_oracle_failure_reply_text,
+    configure_worker_cron_jobs,
     process_advisory_workflow_job,
     process_patch_oracle_job,
     shutdown,
@@ -45,6 +49,30 @@ def test_worker_settings_registers_advisory_job() -> None:
     assert process_patch_oracle_job in WorkerSettings.functions
     assert WorkerSettings.on_startup is not None
     assert WorkerSettings.on_shutdown is not None
+
+
+@pytest.mark.filterwarnings("ignore:.*iscoroutinefunction.*:DeprecationWarning")
+def test_worker_settings_utc_timezone_and_cron_built_for_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert WorkerSettings.timezone is UTC
+    assert WorkerSettings.cron_jobs == ()
+    prev_cron = WorkerSettings.cron_jobs
+    try:
+        monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+        configure_worker_cron_jobs()
+        assert len(WorkerSettings.cron_jobs) == 1
+        cj = WorkerSettings.cron_jobs[0]
+        assert cj.name == "sync_repository_advisories"
+        assert cj.minute == 0
+        assert cj.hour is None
+        assert cj.unique is True
+        assert cj.max_tries == 1
+        jobs_direct = _advisory_sync_cron_jobs()
+        assert len(jobs_direct) == 1
+        assert jobs_direct[0].name == cj.name
+    finally:
+        WorkerSettings.cron_jobs = prev_cron
 
 
 @pytest.mark.asyncio
@@ -73,6 +101,7 @@ async def test_startup_shutdown_roundtrip(tmp_path: Path, monkeypatch: pytest.Mo
     assert "session_factory" in ctx
     assert ctx["llm"] is None
     assert isinstance(ctx["http_client"], httpx.AsyncClient)
+    assert ctx["advisory_polling_enabled"] is False
 
     await shutdown(ctx)
 
@@ -578,5 +607,110 @@ async def test_startup_sets_llm_provider_when_api_key_present(
     await startup(ctx)
     try:
         assert ctx["llm"] is not None
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_startup_advisory_polling_enabled_when_redis_pings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'w.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    redis = AsyncMock()
+    redis.ping = AsyncMock(return_value=True)
+    ctx: dict[str, Any] = {"redis": redis}
+    await startup(ctx)
+    try:
+        assert ctx["advisory_polling_enabled"] is True
+        redis.ping.assert_awaited_once()
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_startup_advisory_polling_disabled_when_redis_ping_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'w.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    redis = AsyncMock()
+    redis.ping = AsyncMock(side_effect=RedisError("nop"))
+    ctx: dict[str, Any] = {"redis": redis}
+    await startup(ctx)
+    try:
+        assert ctx["advisory_polling_enabled"] is False
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_startup_advisory_polling_disabled_when_no_poll_states_but_interval_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n"
+        "    advisory_poll_states: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'w.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    redis = AsyncMock()
+    redis.ping = AsyncMock(return_value=True)
+    ctx: dict[str, Any] = {"redis": redis}
+    await startup(ctx)
+    try:
+        assert ctx["advisory_polling_enabled"] is False
+        redis.ping.assert_not_called()
     finally:
         await shutdown(ctx)

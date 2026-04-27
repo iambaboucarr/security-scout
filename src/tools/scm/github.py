@@ -4,9 +4,11 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Literal, Self
+
+import httpx
 
 from exceptions import SecurityScoutError
 from tools.github import (
@@ -141,8 +143,24 @@ class GitHubSCMProvider:
         max_pages: int = 20,
         finding_id: str | None = None,
         workflow_run_id: uuid.UUID | str | None = None,
+        poll_first_page_if_none_match: str | None = None,
+        poll_on_first_page_not_modified: Callable[[], Awaitable[None]] | None = None,
+        poll_on_first_page_etag: Callable[[str], Awaitable[None]] | None = None,
+        poll_on_list_page_response: Callable[[object], Awaitable[None]] | None = None,
     ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
         owner, name = _split_repo_slug(repo)
+
+        list_page_handler: Callable[[httpx.Response], Awaitable[None]] | None
+        if poll_on_list_page_response is not None:
+            user_cb = poll_on_list_page_response
+
+            async def _wrap_list_page_response(resp: httpx.Response) -> None:
+                await user_cb(resp)
+
+            list_page_handler = _wrap_list_page_response
+        else:
+            list_page_handler = None
+
         async for page in self._client.iter_repository_security_advisories(
             owner,
             name,
@@ -152,6 +170,10 @@ class GitHubSCMProvider:
             max_pages=max_pages,
             finding_id=finding_id,
             workflow_run_id=workflow_run_id,
+            first_page_if_none_match=poll_first_page_if_none_match,
+            on_first_page_not_modified=poll_on_first_page_not_modified,
+            on_first_page_etag=poll_on_first_page_etag,
+            on_list_page_response=list_page_handler,
         ):
             yield page
 

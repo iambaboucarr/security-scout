@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -21,12 +21,13 @@ from redis.exceptions import RedisError
 from sqlalchemy import ColumnElement, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import AppConfig, RepoConfig, Settings
+from config import AdvisoryPollInterval, AppConfig, RepoConfig, Settings
 from exceptions import SecurityScoutError
 from models import AdvisoryWorkflowState, Finding, FindingStatus, WorkflowKind, WorkflowRun
+from tools.github import GitHubAPIError, GitHubMalformedResponseError
 from tools.json_predicate import json_text_at_upper_trimmed
 from tools.rate_limiter import RateLimiterCircuitOpen, RateLimitExceeded, SlidingWindowRateLimiter
-from tools.scm import normalise_ghsa_id
+from tools.scm import SCMProvider, normalise_ghsa_id
 from tools.scm.github import GitHubSCMProvider
 from tools.scm.models import AdvisoryData
 
@@ -211,10 +212,24 @@ async def try_enqueue_advisory(
 
 _SYNC_CONCURRENCY = 8
 _POLL_WM_PREFIX = "poll:advisory:wm:"
+_POLL_ETAG_PREFIX = "etag:advisory:"
+_ADVISORY_LIST_ETAG_TTL_SEC = 7 * 24 * 3600
 
 
 def advisory_list_watermark_key(*, repo_slug: str, state: str) -> str:
     return f"{_POLL_WM_PREFIX}{repo_slug}:{state.strip().lower()}"
+
+
+def advisory_list_etag_key(*, repo_slug: str, state: str) -> str:
+    return f"{_POLL_ETAG_PREFIX}{repo_slug}:{state.strip().lower()}"
+
+
+def _stored_etag_from_redis(raw: str | bytes | None) -> str | None:
+    if raw is None:
+        return None
+    s = raw.decode() if isinstance(raw, bytes) else str(raw)
+    s = s.strip()
+    return s if s else None
 
 
 def _parse_watermark_value(raw: str | bytes | None) -> datetime | None:
@@ -241,6 +256,50 @@ def _advisory_utc(a: AdvisoryData) -> datetime | None:
     if a.updated_at is not None:
         return a.updated_at
     return a.published_at
+
+
+def _github_ratelimit_remaining_value(response: object) -> int | None:
+    h = getattr(response, "headers", None)
+    if h is None or not callable(getattr(h, "get", None)):
+        return None
+    raw = h.get("x-ratelimit-remaining")
+    if raw is None:
+        raw = h.get("X-RateLimit-Remaining")
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s.isdigit():
+        return None
+    return int(s)
+
+
+async def _log_advisory_poll_ratelimit_gauge(*, repo: str, response: object) -> None:
+    n = _github_ratelimit_remaining_value(response)
+    if n is None:
+        return
+    _LOG.info(
+        "advisory_poll_ratelimit_remaining",
+        metric_name="advisory_poll_ratelimit_remaining",
+        repo=repo,
+        remaining=n,
+    )
+
+
+def _log_advisory_poll_api_error(*, repo: str, exc: BaseException) -> None:
+    if isinstance(exc, GitHubAPIError) and exc.http_status is not None:
+        status = str(exc.http_status)
+    elif isinstance(exc, httpx.RequestError):
+        status = "request_error"
+    elif isinstance(exc, GitHubMalformedResponseError):
+        status = "parse_error"
+    else:
+        status = type(exc).__name__
+    _LOG.warning(
+        "advisory_poll_api_error",
+        metric_name="advisory_poll_api_errors_total",
+        repo=repo,
+        status=status,
+    )
 
 
 class _GlobalEnqueueBudget:
@@ -280,7 +339,7 @@ def _advisory_rate_limiter_build(
 async def _sync_one_poll_state(
     *,
     redis: ArqRedis,
-    scm: GitHubSCMProvider,
+    scm: SCMProvider,
     rate_limiter: SlidingWindowRateLimiter,
     settings: Settings,
     repo: RepoConfig,
@@ -289,149 +348,189 @@ async def _sync_one_poll_state(
     state: str,
     global_budget: _GlobalEnqueueBudget,
 ) -> None:
-    st = state.strip().lower()
-    wm_key = advisory_list_watermark_key(repo_slug=repo_slug, state=st)
-    raw = await redis.get(wm_key)
-    old_w = _parse_watermark_value(raw) if raw else None
+    async def _body() -> None:
+        st = state.strip().lower()
+        wm_key = advisory_list_watermark_key(repo_slug=repo_slug, state=st)
+        etag_key = advisory_list_etag_key(repo_slug=repo_slug, state=st)
+        raw_etag = await redis.get(etag_key)
+        stored_if_none_match = _stored_etag_from_redis(raw_etag)
+        raw = await redis.get(wm_key)
+        old_w = _parse_watermark_value(raw) if raw else None
 
-    if old_w is None and repo.advisory_poll_seed_without_enqueue:
-        it = aiter(
-            scm.iter_list_advisories(
-                repo_slug,
+        async def _persist_list_etag(value: str) -> None:
+            await redis.set(etag_key, value, ex=_ADVISORY_LIST_ETAG_TTL_SEC)
+
+        async def _on_list_304() -> None:
+            _LOG.info(
+                "advisory_poll_etag_not_modified",
+                metric_name="advisory_poll_etag_hits_total",
+                repo=repo_config_name,
                 state=st,
-                per_page=repo.advisory_poll_per_page,
-                max_pages=1,
             )
-        )
-        try:
-            await _advisory_rate_limiter_build(rate_limiter, settings)
-            first: tuple[AdvisoryData, ...] = await it.__anext__()
-        except StopAsyncIteration, RateLimitExceeded, RateLimiterCircuitOpen:
-            first = ()
-        uas = [u for a in first if (u := _advisory_utc(a)) is not None]
-        if uas:
-            seed_max = max(uas)
-            await redis.set(wm_key, _watermark_iso_utc(seed_max))
-        _LOG.info(
-            "advisory_poll_seed_only",
-            metric_name="advisory_poll_listed_total",
-            repo=repo_config_name,
-            state=st,
-            listed=len(first),
-        )
-        return
 
-    per_repo_enqueues = 0
-    hit_enq_cap = False
-    seen_ua: list[datetime] = []
-    enqueued_ua: list[datetime] = []
-    natural_stop = False
-    exhausted_pages = False
-    hit_rl = False
-    listed = 0
+        async def _on_list_gauge(response: object) -> None:
+            await _log_advisory_poll_ratelimit_gauge(repo=repo_config_name, response=response)
 
-    it2 = aiter(
-        scm.iter_list_advisories(
+        if old_w is None and repo.advisory_poll_seed_without_enqueue:
+            if_none_match_seed: str | None = stored_if_none_match
+            first: tuple[AdvisoryData, ...] = ()
+            while True:
+                it: AsyncIterator[tuple[AdvisoryData, ...]] = scm.iter_list_advisories(
+                    repo_slug,
+                    state=st,
+                    per_page=repo.advisory_poll_per_page,
+                    max_pages=1,
+                    poll_first_page_if_none_match=if_none_match_seed,
+                    poll_on_first_page_not_modified=_on_list_304,
+                    poll_on_first_page_etag=_persist_list_etag,
+                    poll_on_list_page_response=_on_list_gauge,
+                )
+                try:
+                    await _advisory_rate_limiter_build(rate_limiter, settings)
+                    first = await it.__anext__()
+                except RateLimitExceeded, RateLimiterCircuitOpen:
+                    first = ()
+                    break
+                except StopAsyncIteration:
+                    if if_none_match_seed is not None:
+                        await redis.delete(etag_key)
+                        if_none_match_seed = None
+                        continue
+                    first = ()
+                    break
+                break
+            uas = [u for a in first if (u := _advisory_utc(a)) is not None]
+            if uas:
+                seed_max = max(uas)
+                await redis.set(wm_key, _watermark_iso_utc(seed_max))
+            _LOG.info(
+                "advisory_poll_seed_only",
+                metric_name="advisory_poll_listed_total",
+                repo=repo_config_name,
+                state=st,
+                listed=len(first),
+            )
+            return
+
+        per_repo_enqueues = 0
+        hit_enq_cap = False
+        seen_ua: list[datetime] = []
+        enqueued_ua: list[datetime] = []
+        natural_stop = False
+        exhausted_pages = False
+        hit_rl = False
+        listed = 0
+
+        it2: AsyncIterator[tuple[AdvisoryData, ...]] = scm.iter_list_advisories(
             repo_slug,
             state=st,
             per_page=repo.advisory_poll_per_page,
             max_pages=repo.advisory_poll_max_pages,
+            poll_first_page_if_none_match=stored_if_none_match,
+            poll_on_first_page_not_modified=_on_list_304,
+            poll_on_first_page_etag=_persist_list_etag,
+            poll_on_list_page_response=_on_list_gauge,
         )
-    )
-    while True:
-        if hit_enq_cap or hit_rl or natural_stop:
-            break
-        try:
-            await _advisory_rate_limiter_build(rate_limiter, settings)
-        except RateLimitExceeded, RateLimiterCircuitOpen:
-            hit_rl = True
-            break
-        try:
-            page: tuple[AdvisoryData, ...] = await it2.__anext__()
-        except StopAsyncIteration:
-            exhausted_pages = True
-            break
-        listed += len(page)
-        for adv in page:
-            ua = _advisory_utc(adv)
-            if old_w is not None and ua is not None and ua <= old_w:
-                natural_stop = True
+        while True:
+            if hit_enq_cap or hit_rl or natural_stop:
                 break
-            if ua is not None:
-                seen_ua.append(ua)
-
-            if per_repo_enqueues >= repo.advisory_poll_max_enqueues_per_tick:
-                hit_enq_cap = True
+            try:
+                await _advisory_rate_limiter_build(rate_limiter, settings)
+            except RateLimitExceeded, RateLimiterCircuitOpen:
+                hit_rl = True
                 break
-
-            ghsa = adv.ghsa_id
-
-            async def _do_try_enqueue(ghsa_id: str = ghsa) -> str | None:
-                return await try_enqueue_advisory(
-                    redis,
-                    repo_config_name=repo_config_name,
-                    repo_slug=repo_slug,
-                    ghsa_id=ghsa_id,
-                    advisory_source="repository",
-                    poll_interval_seconds=settings.advisory_poll_interval_seconds,
-                )
-
-            job, hit_g = await global_budget.try_one_enqueue(_do_try_enqueue)
-            if hit_g:
-                hit_enq_cap = True
+            try:
+                page: tuple[AdvisoryData, ...] = await it2.__anext__()
+            except StopAsyncIteration:
+                exhausted_pages = True
                 break
-            if job is not None:
-                per_repo_enqueues += 1
+            listed += len(page)
+            for adv in page:
+                ua = _advisory_utc(adv)
+                if old_w is not None and ua is not None and ua <= old_w:
+                    natural_stop = True
+                    break
                 if ua is not None:
-                    enqueued_ua.append(ua)
-                try:
-                    gid = normalise_ghsa_id(ghsa)
-                except ValueError:
-                    gid = ghsa
-                _LOG.info(
-                    "advisory_poll_enqueued",
-                    metric_name="advisory_poll_enqueued_total",
-                    repo=repo_config_name,
-                    state=st,
-                    ghsa_id=gid,
-                )
-        if natural_stop or hit_enq_cap:
-            break
+                    seen_ua.append(ua)
 
-    if listed:
-        _LOG.info(
-            "advisory_poll_listed_batch",
-            metric_name="advisory_poll_listed_total",
-            repo=repo_config_name,
-            state=st,
-            listed=listed,
-        )
+                if per_repo_enqueues >= repo.advisory_poll_max_enqueues_per_tick:
+                    hit_enq_cap = True
+                    break
 
-    if hit_rl or hit_enq_cap:
-        new_w = old_w
-    elif enqueued_ua:
-        new_w = min(enqueued_ua)
-    elif not enqueued_ua and seen_ua and not hit_enq_cap and not hit_rl and (natural_stop or exhausted_pages):
-        new_w = min(seen_ua)
-    else:
-        new_w = old_w
+                ghsa = adv.ghsa_id
 
-    if new_w != old_w and new_w is not None:
-        await redis.set(wm_key, _watermark_iso_utc(new_w))
+                async def _do_try_enqueue(ghsa_id: str = ghsa) -> str | None:
+                    return await try_enqueue_advisory(
+                        redis,
+                        repo_config_name=repo_config_name,
+                        repo_slug=repo_slug,
+                        ghsa_id=ghsa_id,
+                        advisory_source="repository",
+                        poll_interval_seconds=settings.advisory_poll_interval_seconds_for_dedup(),
+                    )
 
-    if hit_rl or hit_enq_cap:
-        _LOG.info(
-            "advisory_poll_state_sync_end",
-            repo=repo_config_name,
-            state=st,
-            hit_rate_limit=hit_rl,
-            hit_enqueue_cap=hit_enq_cap,
-        )
+                job, hit_g = await global_budget.try_one_enqueue(_do_try_enqueue)
+                if hit_g:
+                    hit_enq_cap = True
+                    break
+                if job is not None:
+                    per_repo_enqueues += 1
+                    if ua is not None:
+                        enqueued_ua.append(ua)
+                    try:
+                        gid = normalise_ghsa_id(ghsa)
+                    except ValueError:
+                        gid = ghsa
+                    _LOG.info(
+                        "advisory_poll_enqueued",
+                        metric_name="advisory_poll_enqueued_total",
+                        repo=repo_config_name,
+                        state=st,
+                        ghsa_id=gid,
+                    )
+            if natural_stop or hit_enq_cap:
+                break
+
+        if listed:
+            _LOG.info(
+                "advisory_poll_listed_batch",
+                metric_name="advisory_poll_listed_total",
+                repo=repo_config_name,
+                state=st,
+                listed=listed,
+            )
+
+        if hit_rl:
+            new_w = old_w
+        elif enqueued_ua:
+            new_w = min(enqueued_ua)
+        elif not enqueued_ua and seen_ua and not hit_enq_cap and (natural_stop or exhausted_pages):
+            new_w = min(seen_ua)
+        else:
+            new_w = old_w
+
+        if new_w != old_w and new_w is not None:
+            await redis.set(wm_key, _watermark_iso_utc(new_w))
+
+        if hit_rl or hit_enq_cap:
+            _LOG.info(
+                "advisory_poll_state_sync_end",
+                repo=repo_config_name,
+                state=st,
+                hit_rate_limit=hit_rl,
+                hit_enqueue_cap=hit_enq_cap,
+            )
+
+    try:
+        await _body()
+    except (GitHubAPIError, GitHubMalformedResponseError, httpx.RequestError) as e:
+        _log_advisory_poll_api_error(repo=repo_config_name, exc=e)
+        raise
 
 
 async def _run_one_repo_for_sync(
     sem: asyncio.Semaphore,
-    scm: GitHubSCMProvider,
+    scm: SCMProvider,
     *,
     redis: ArqRedis,
     rate_limiter: SlidingWindowRateLimiter,
@@ -442,7 +541,7 @@ async def _run_one_repo_for_sync(
 ) -> str | None:
     async with sem:
         if "published" in (x.strip().lower() for x in repo.advisory_poll_states):
-            _LOG.info(
+            _LOG.warning(
                 "advisory_poll_published_in_poll_states",
                 metric_name="advisory_poll_redundant_with_webhook_total",
                 repo=repo.name,
@@ -550,7 +649,14 @@ async def run_repository_advisories_sync(
 
 
 async def run_repository_advisories_sync_from_worker_ctx(ctx: dict[str, object]) -> None:
-    """Load config from a worker job context and run :func:`run_repository_advisories_sync`."""
+    """Load config from a worker job context and run :func:`run_repository_advisories_sync`.
+
+    When :attr:`~config.Settings.advisory_poll_interval` is not ``disabled`` (scheduled polling),
+    the worker sets ``advisory_polling_enabled`` in ``ctx`` only after a successful Redis ``PING``.
+    This function skips the sync in that case if the flag is falsey, so missed gates do not run
+    a scheduled tick against GitHub. When the interval is ``disabled``, the flag is ignored and
+    manual or ad-hoc job enqueues still run if Redis and the rest of the context are valid.
+    """
     settings = ctx.get("settings")
     app = ctx.get("app_config")
     redis = ctx.get("redis")
@@ -560,6 +666,16 @@ async def run_repository_advisories_sync_from_worker_ctx(ctx: dict[str, object])
         return
     if redis is not None and not isinstance(redis, ArqRedis):
         _LOG.error("advisory_sync_invalid_ctx", field="redis")
+        return
+    if settings.advisory_poll_interval != AdvisoryPollInterval.disabled and not bool(
+        ctx.get("advisory_polling_enabled")
+    ):
+        _LOG.warning(
+            "advisory_poll_skipped",
+            reason="advisory_polling_not_enabled",
+            metric_name="advisory_poll_skipped_total",
+            interval=settings.advisory_poll_interval.value,
+        )
         return
     await run_repository_advisories_sync(
         settings=settings,
