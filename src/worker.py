@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
@@ -18,9 +19,11 @@ from ai.provider import LLMProvider
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, session_scope
 from exceptions import SecurityScoutError
+from tools.advisory_polling import has_active_workflow_run, has_existing_advisory_finding
 from tools.docker_sandbox import SandboxBuildError
 from tools.issue_tracker import IssueTrackerCredentials
 from tools.rate_limiter import SlidingWindowRateLimiter
+from tools.scm import normalise_ghsa_id
 from tools.scm.github import GitHubSCMProvider
 from tools.slack import SlackAPIError, SlackClient
 
@@ -93,6 +96,8 @@ async def process_advisory_workflow_job(
     if resume_workflow_run_id is not None:
         resume_uuid = uuid.UUID(resume_workflow_run_id)
 
+    repo_slug = f"{repo.github_org}/{repo.github_repo}".lower()
+
     async def schedule_retry(params: ScheduleRetryParams) -> None:
         await ctx["redis"].enqueue_job(
             process_advisory_workflow_job,
@@ -114,6 +119,42 @@ async def process_advisory_workflow_job(
         SlackClient(settings.slack_bot_token) as slack,
         session_scope(session_factory) as session,
     ):
+        if resume_workflow_run_id is None:
+            try:
+                g_norm = normalise_ghsa_id(ghsa_id)
+            except ValueError:
+                _LOG.error("worker_invalid_ghsa", ghsa_id=ghsa_id, repo_name=repo_name)
+                return
+            if await has_existing_advisory_finding(
+                session,
+                repo_slug=repo_slug,
+                ghsa_id=g_norm,
+            ):
+                _LOG.info(
+                    "advisory_workflow_dedupe_skip",
+                    metric_name="advisory_poll_skipped_dedupe_total",
+                    reason="finding_exists",
+                    repo=repo_name,
+                    repo_slug=repo_slug,
+                    ghsa_id=g_norm,
+                )
+                return
+            if await has_active_workflow_run(
+                session,
+                repo_slug=repo_slug,
+                ghsa_id=g_norm,
+                now=datetime.now(UTC),
+            ):
+                _LOG.info(
+                    "advisory_workflow_dedupe_skip",
+                    metric_name="advisory_poll_skipped_dedupe_total",
+                    reason="run_exists",
+                    repo=repo_name,
+                    repo_slug=repo_slug,
+                    ghsa_id=g_norm,
+                )
+                return
+
         await run_advisory_workflow(
             session,
             repo,

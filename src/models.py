@@ -36,6 +36,26 @@ class FindingStatus(StrEnum):
     accepted_risk = "accepted_risk"
 
 
+class AdvisoryWorkflowState(StrEnum):
+    received = "received"
+    triaging = "triaging"
+    triage_complete = "triage_complete"
+    pre_flight = "pre_flight"
+    pre_flight_suspicious = "pre_flight_suspicious"
+    awaiting_preflight_decision = "awaiting_preflight_decision"
+    pre_flight_blocked = "pre_flight_blocked"
+    building_env = "building_env"
+    executing_sandbox = "executing_sandbox"
+    sandbox_complete = "sandbox_complete"
+    reporting = "reporting"
+    awaiting_approval = "awaiting_approval"
+    done = "done"
+    error_triage = "error_triage"
+    error_sandbox = "error_sandbox"
+    error_reporting = "error_reporting"
+    error_unrecoverable = "error_unrecoverable"
+
+
 class SSVCAction(StrEnum):
     immediate = "immediate"
     act = "act"
@@ -114,6 +134,7 @@ class WorkflowRun(Base):
         nullable=False,
     )
     repo_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    advisory_ghsa_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     state: Mapped[str] = mapped_column(String(128), nullable=False)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

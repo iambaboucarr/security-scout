@@ -6,7 +6,6 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,13 +20,20 @@ from agents.triage import run_advisory_triage
 from ai.provider import LLMProvider
 from config import RepoConfig
 from exceptions import SecurityScoutError
-from models import AgentActionLog, Finding, WorkflowKind, WorkflowRun
+from models import (
+    AdvisoryWorkflowState,
+    AgentActionLog,
+    Finding,
+    WorkflowKind,
+    WorkflowRun,
+)
 from tools.circuit_breaker import ExternalApiCircuitBreaker
 from tools.docker_sandbox import SandboxError
 from tools.issue_tracker import IssueTrackerCredentials
 from tools.poc_preflight import PreflightVerdict
 from tools.poc_preflight import validate as run_preflight
 from tools.rate_limiter import RateLimiterCircuitOpen, RateLimitExceeded, SlidingWindowRateLimiter
+from tools.scm import normalise_ghsa_id
 from tools.scm.protocol import SCMProvider
 from tools.slack import (
     ApprovalButtonContext,
@@ -42,26 +48,6 @@ _LOG = structlog.get_logger(__name__)
 _MAX_LOG_OUTPUT = 500
 
 _RATE_LIMIT_RETRY_SECONDS = 120
-
-
-class AdvisoryWorkflowState(StrEnum):
-    received = "received"
-    triaging = "triaging"
-    triage_complete = "triage_complete"
-    pre_flight = "pre_flight"
-    pre_flight_suspicious = "pre_flight_suspicious"
-    awaiting_preflight_decision = "awaiting_preflight_decision"
-    pre_flight_blocked = "pre_flight_blocked"
-    building_env = "building_env"
-    executing_sandbox = "executing_sandbox"
-    sandbox_complete = "sandbox_complete"
-    reporting = "reporting"
-    awaiting_approval = "awaiting_approval"
-    done = "done"
-    error_triage = "error_triage"
-    error_sandbox = "error_sandbox"
-    error_reporting = "error_reporting"
-    error_unrecoverable = "error_unrecoverable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +165,7 @@ async def run_advisory_workflow(
         run = WorkflowRun(
             workflow_type=WorkflowKind.advisory,
             repo_name=repo_slug,
+            advisory_ghsa_id=normalise_ghsa_id(ghsa_id),
             state=AdvisoryWorkflowState.received.value,
             retry_count=0,
             finding_id=None,

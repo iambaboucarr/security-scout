@@ -20,9 +20,16 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agents.orchestrator import AdvisoryWorkflowState
 from config import AppConfig, RepoConfig
-from models import AgentActionLog, Finding, FindingStatus, TriageAccuracy, TriageDecision, WorkflowRun
+from models import (
+    AdvisoryWorkflowState,
+    AgentActionLog,
+    Finding,
+    FindingStatus,
+    TriageAccuracy,
+    TriageDecision,
+    WorkflowRun,
+)
 from tools.slack import (
     ApprovalButtonContext,
     SlackAPIError,

@@ -26,8 +26,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agents.orchestrator import AdvisoryWorkflowState
-from models import AgentActionLog, Finding, FindingStatus, KnownStatus, WorkflowRun
+from models import AdvisoryWorkflowState, AgentActionLog, Finding, FindingStatus, KnownStatus, WorkflowRun
 from tools.slack import (
     ApprovalButtonContext,
     SlackAPIError,

@@ -17,6 +17,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, log_and_persist_config_loaded, session_scope
 from models import Base
+from tools.advisory_polling import try_enqueue_advisory
 from webhooks import create_github_webhook_router
 from webhooks.slack import create_slack_webhook_router
 
@@ -146,19 +147,18 @@ def create_app() -> FastAPI:
             advisory_source: str = "repository",
             resume_workflow_run_id: str | None = None,
         ) -> str | None:
-            job = await redis_pool.enqueue_job(
-                "process_advisory_workflow_job",
-                repo_name=repo_name,
+            cfg = next((r for r in app_config.repos.repos if r.name == repo_name), None)
+            if cfg is None:
+                return None
+            repo_slug = f"{cfg.github_org}/{cfg.github_repo}".lower()
+            return await try_enqueue_advisory(
+                redis_pool,
+                repo_config_name=repo_name,
+                repo_slug=repo_slug,
                 ghsa_id=ghsa_id,
                 advisory_source=advisory_source,
                 resume_workflow_run_id=resume_workflow_run_id,
             )
-            if job is None:
-                return None
-            if isinstance(job, str):
-                return job
-            jid = getattr(job, "job_id", None)
-            return str(jid) if jid is not None else None
 
         app.state.enqueue_advisory = enqueue_advisory
 

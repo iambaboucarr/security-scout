@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -8,7 +9,14 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from models import FindingStatus
+from db import session_scope
+from models import (
+    Base,
+    Finding,
+    FindingStatus,
+    Severity,
+    WorkflowKind,
+)
 from tools.slack import SlackAPIError
 from worker import (
     WorkerSettings,
@@ -93,6 +101,118 @@ async def test_process_advisory_workflow_job_unknown_repo_logs_and_returns(
     await startup(ctx)
     try:
         await process_advisory_workflow_job(ctx, repo_name="nope", ghsa_id="GHSA-AAAA-BBBB-CCCC")
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_process_advisory_workflow_job_skips_on_dedupe_finding_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ghsa = "GHSA-ABAA-ABAA-ABAA"
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "dd.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+    ctx: dict[str, Any] = {}
+    await startup(ctx)
+    try:
+        engine = ctx["engine"]
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with session_scope(ctx["session_factory"]) as s:
+            s.add(
+                Finding(
+                    id=uuid.uuid4(),
+                    workflow=WorkflowKind.advisory,
+                    repo_name="acme/app",
+                    source_ref="https://github.com/advisories/x",
+                    severity=Severity.high,
+                    title="t",
+                    status=FindingStatus.unconfirmed,
+                    evidence={"ghsa_id": ghsa},
+                ),
+            )
+            await s.commit()
+        with patch("worker.run_advisory_workflow", new_callable=AsyncMock) as m_run:
+            await process_advisory_workflow_job(
+                ctx,
+                repo_name="demo",
+                ghsa_id=ghsa,
+                advisory_source="repository",
+            )
+        m_run.assert_not_awaited()
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_process_advisory_workflow_job_runs_when_prior_finding_is_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ghsa = "GHSA-ACAA-ACAA-ACAA"
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "dd2.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+    ctx: dict[str, Any] = {}
+    await startup(ctx)
+    try:
+        engine = ctx["engine"]
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with session_scope(ctx["session_factory"]) as s:
+            s.add(
+                Finding(
+                    id=uuid.uuid4(),
+                    workflow=WorkflowKind.advisory,
+                    repo_name="acme/app",
+                    source_ref="https://github.com/advisories/x",
+                    severity=Severity.high,
+                    title="t",
+                    status=FindingStatus.false_positive,
+                    evidence={"ghsa_id": ghsa},
+                ),
+            )
+            await s.commit()
+        with patch("worker.run_advisory_workflow", new_callable=AsyncMock) as m_run:
+            await process_advisory_workflow_job(
+                ctx,
+                repo_name="demo",
+                ghsa_id=ghsa,
+                advisory_source="repository",
+            )
+        m_run.assert_awaited_once()
     finally:
         await shutdown(ctx)
 

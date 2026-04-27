@@ -12,9 +12,8 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.approval import ApprovalContext
-from agents.orchestrator import AdvisoryWorkflowState
 from config import AppConfig, RepoConfig
-from models import Finding, FindingStatus, WorkflowRun
+from models import AdvisoryWorkflowState, Finding, FindingStatus, WorkflowRun
 from tools.slack import SlackAPIError, SlackClient, SlackMalformedResponseError
 
 if TYPE_CHECKING:

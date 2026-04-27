@@ -81,6 +81,20 @@ class _ImmediateRedisPool:
 
     def __init__(self, holder: dict[str, Any]) -> None:
         self._holder = holder
+        self._dedup_keys: dict[str, str] = {}
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        nx: bool = False,
+        ex: int | None = None,
+    ) -> bool | None:
+        if nx and key in self._dedup_keys:
+            return None
+        self._dedup_keys[key] = value
+        return True
 
     async def close(self) -> None:
         return None

@@ -76,8 +76,24 @@ def test_github_webhook_ping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     app = create_app()
 
     class _Pool:
+        def __init__(self) -> None:
+            self._dedup_keys: dict[str, str] = {}
+
         async def close(self) -> None:
             return None
+
+        async def set(
+            self,
+            key: str,
+            value: str,
+            *,
+            nx: bool = False,
+            ex: int | None = None,
+        ) -> bool | None:
+            if nx and key in self._dedup_keys:
+                return None
+            self._dedup_keys[key] = value
+            return True
 
         async def enqueue_job(self, *_a: object, **_kw: object) -> str:
             return "job-id"
@@ -130,8 +146,24 @@ def test_github_webhook_enqueues_repository_advisory(tmp_path: Path, monkeypatch
     enqueued: list[dict[str, str]] = []
 
     class _Pool:
+        def __init__(self) -> None:
+            self._dedup_keys: dict[str, str] = {}
+
         async def close(self) -> None:
             return None
+
+        async def set(
+            self,
+            key: str,
+            value: str,
+            *,
+            nx: bool = False,
+            ex: int | None = None,
+        ) -> bool | None:
+            if nx and key in self._dedup_keys:
+                return None
+            self._dedup_keys[key] = value
+            return True
 
         async def enqueue_job(self, *_a: object, **kw: object) -> str:
             enqueued.append({k: str(v) for k, v in kw.items()})
@@ -192,8 +224,24 @@ def _webhook_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FastA
     enqueued: list[dict[str, str]] = []
 
     class _Pool:
+        def __init__(self) -> None:
+            self._dedup_keys: dict[str, str] = {}
+
         async def close(self) -> None:
             return None
+
+        async def set(
+            self,
+            key: str,
+            value: str,
+            *,
+            nx: bool = False,
+            ex: int | None = None,
+        ) -> bool | None:
+            if nx and key in self._dedup_keys:
+                return None
+            self._dedup_keys[key] = value
+            return True
 
         async def enqueue_job(self, *_a: object, **kw: object) -> str:
             enqueued.append({k: str(v) for k, v in kw.items()})

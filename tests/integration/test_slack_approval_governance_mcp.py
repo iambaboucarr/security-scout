@@ -313,7 +313,7 @@ class TestSlackApprovalEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-REJECT",
+                ghsa_id="GHSA-T3ST-R3J1-T3ST",
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -373,7 +373,7 @@ class TestSlackApprovalEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-ESCALATE",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         finding = await db_session.get(Finding, run.finding_id)
@@ -423,7 +423,7 @@ class TestSlackApprovalEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-DOUBLE",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         finding = await db_session.get(Finding, run.finding_id)
@@ -493,7 +493,7 @@ class TestGovernanceRoutingEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-INFO-TEST",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         assert run.state == AdvisoryWorkflowState.done.value
@@ -540,7 +540,7 @@ class TestGovernanceRoutingEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-LOW-TEST",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         assert run.state == AdvisoryWorkflowState.done.value
@@ -571,7 +571,7 @@ class TestGovernanceRoutingEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-NOTIFY-TEST",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         assert run.state == AdvisoryWorkflowState.done.value
@@ -600,7 +600,7 @@ class TestGovernanceRoutingEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-APPROVE-TEST",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -624,7 +624,7 @@ class TestGovernanceRoutingEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-DEFAULT",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -650,7 +650,7 @@ class TestGovernanceRoutingEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-PREC",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -678,7 +678,7 @@ class TestGovernanceRoutingEndToEnd:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-AUDIT",
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
             )
 
         logs = (
