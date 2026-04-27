@@ -44,7 +44,7 @@ chore(ci): pin action digests for zizmor
 
 ## Before you open a PR
 
-- Run **`make check`** (or the same steps CI runs: lint, typecheck, tests with coverage).
+- Run **`make check`** (lint, typecheck, SQLite test suite, then the `@pytest.mark.postgres` suite). For the Postgres suite locally, run **`docker compose up -d postgres`** (or set **`POSTGRES_TEST_URL`**); **`make test`** stays SQLite-only for a fast loop.
 - Keep commits **atomic** when practical: one logical change per commit.
 - Do not commit secrets; `.env` stays local (see `.env.example`).
 
@@ -55,3 +55,4 @@ chore(ci): pin action digests for zizmor
 | [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)                                                       | Normative commit grammar                                               |
 | [Angular — commit message guidelines](https://github.com/angular/angular/blob/main/contributing-docs/commit-message-guidelines.md) | Detailed examples and team conventions (historical basis for the spec) |
 | `CLAUDE.md`                                                                                                                        | Project-specific implementation standards                              |
+| `.cursor/skills/fastapi/SKILL.md`                                                                                                 | FastAPI / Pydantic agent guidance (see `references/security-scout.md` for repo overrides) |

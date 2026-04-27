@@ -11,8 +11,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "anthropic>=0.52",
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.34",
+    "fastapi[standard]>=0.115",
     "arq>=0.26",
     "sqlalchemy[asyncio]>=2.0",
     "alembic>=1.15",
@@ -73,6 +72,9 @@ packages = ["src/agents", "src/tools", "src/webhooks", "src/config", "src/ai"]
 constraint-dependencies = [
     "authlib>=1.6.11",  # GHSA-jj8c-mmj3-mmgv: CSRF on cache-backed OAuth
 ]
+
+[tool.fastapi]
+entrypoint = "main:app"
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 
@@ -158,6 +160,7 @@ timeout = 30
 markers = [
     "slow: sandbox/Docker tests (deselect with -m 'not slow')",
     "integration: tests requiring external services (Redis, DB)",
+    "postgres: tests requiring PostgreSQL (run via make check / pytest -m postgres; see POSTGRES_TEST_URL)",
 ]
 addopts = "-x --strict-markers"
 
