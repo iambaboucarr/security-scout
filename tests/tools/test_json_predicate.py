@@ -38,6 +38,8 @@ def test_json_text_at_invalid_path_rejected() -> None:
     c = column("j", type_=JSON)
     with pytest.raises(ValueError, match="invalid json path key"):
         json_text_at(c, "a.b")
+    with pytest.raises(ValueError, match="invalid json path key"):
+        json_text_at(c, "é")
     with pytest.raises(ValueError, match="requires at least one path key"):
         json_text_at(c)
 

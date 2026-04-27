@@ -10,7 +10,7 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import ColumnElement
 from sqlalchemy.sql.functions import FunctionElement
 
-_PATH_KEY_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_PATH_KEY_RE = re.compile(r"^\w+$", re.ASCII)
 
 
 class _JsonTextAt(FunctionElement[Any]):
@@ -33,8 +33,8 @@ def json_text_at(column: Any, *path_keys: str) -> ColumnElement[Any]:
     subscript operators and compiles to the text form (``->>``) via
     :meth:`sqlalchemy.sql.elements.BinaryExpression.as_string`.
 
-    Each key must match ``[A-Za-z0-9_]+`` so path segments cannot be confused
-    with JSON path injection.
+    Each key must be ASCII alphanumerics and underscore only so path segments
+    cannot be confused with JSON path injection.
     """
     if not path_keys:
         msg = "json_text_at requires at least one path key"
@@ -51,21 +51,23 @@ def json_text_at_upper_trimmed(column: Any, *path_keys: str) -> ColumnElement[An
     return func.upper(func.trim(json_text_at(column, *path_keys)))
 
 
-@compiles(_JsonTextAt)
 def _compile_json_text_unsupported(_element: _JsonTextAt, _compiler: Any, **_kw: Any) -> NoReturn:
     msg = "json_text_at is only supported for sqlite and postgresql"
     raise CompileError(msg)
 
 
-@compiles(_JsonTextAt, "sqlite")
 def _compile_json_text_sqlite(element: _JsonTextAt, compiler: Any, **kw: Any) -> str:
     path = "$" + "".join(f".{k}" for k in element.path_keys)
     return cast(str, compiler.process(func.json_extract(element.column, path), **kw))
 
 
-@compiles(_JsonTextAt, "postgresql")
 def _compile_json_text_postgresql(element: _JsonTextAt, compiler: Any, **kw: Any) -> str:
     expr: Any = element.column
     for k in element.path_keys:
         expr = expr[k]
     return cast(str, compiler.process(expr.as_string(), **kw))
+
+
+compiles(_JsonTextAt)(_compile_json_text_unsupported)
+compiles(_JsonTextAt, "sqlite")(_compile_json_text_sqlite)
+compiles(_JsonTextAt, "postgresql")(_compile_json_text_postgresql)
