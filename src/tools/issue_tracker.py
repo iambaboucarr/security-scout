@@ -13,12 +13,13 @@ from typing import Any, Protocol, runtime_checkable
 import httpx
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import GitHubIssuesTrackerConfig, JiraTrackerConfig, LinearTrackerConfig
 from models import Finding, FindingStatus, WorkflowKind
 from tools.github import validate_github_repo_name, validate_github_repo_owner
+from tools.json_predicate import json_text_at_upper_trimmed
 from tools.scm import IssueSearchItem, SCMProvider, normalise_ghsa_id
 
 _LOG = structlog.get_logger(__name__)
@@ -107,17 +108,6 @@ def _finding_has_cwe(row: Finding, cwe: str) -> bool:
         return False
     want = _normalise_cwe_token(cwe)
     return any(_normalise_cwe_token(x) == want for x in ids)
-
-
-def _finding_has_ghsa(row: Finding, ghsa: str) -> bool:
-    ev = row.evidence
-    if isinstance(ev, dict):
-        raw = ev.get("ghsa_id")
-        if isinstance(raw, str):
-            n = _try_normalise_ghsa(raw)
-            if n is not None and n == ghsa:
-                return True
-    return ghsa.upper() in row.source_ref.upper()
 
 
 class TrackerMatch(BaseModel):
@@ -261,15 +251,18 @@ async def _scout_append_ghsa_matches(
     *,
     repo_slug: str | None,
 ) -> None:
-    stmt = select(Finding).where(Finding.workflow == WorkflowKind.advisory)
+    ghsa_in_evidence = json_text_at_upper_trimmed(Finding.evidence, "ghsa_id") == ghsa
+    ghsa_in_source = func.upper(Finding.source_ref).contains(ghsa)
+    stmt = select(Finding).where(
+        Finding.workflow == WorkflowKind.advisory,
+        or_(ghsa_in_evidence, ghsa_in_source),
+    )
     if repo_slug is not None:
         stmt = stmt.where(Finding.repo_name == repo_slug)
     if exclude is not None:
         stmt = stmt.where(Finding.id != exclude)
     result = await session.execute(stmt)
     for row in result.scalars():
-        if not _finding_has_ghsa(row, ghsa):
-            continue
         if row.id in seen_ids:
             continue
         seen_ids.add(row.id)
