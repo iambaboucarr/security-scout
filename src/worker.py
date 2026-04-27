@@ -19,7 +19,11 @@ from ai.provider import LLMProvider
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, session_scope
 from exceptions import SecurityScoutError
-from tools.advisory_polling import has_active_workflow_run, has_existing_advisory_finding
+from tools.advisory_polling import (
+    has_active_workflow_run,
+    has_existing_advisory_finding,
+    run_repository_advisories_sync_from_worker_ctx,
+)
 from tools.docker_sandbox import SandboxBuildError
 from tools.issue_tracker import IssueTrackerCredentials
 from tools.rate_limiter import SlidingWindowRateLimiter
@@ -176,6 +180,11 @@ async def process_advisory_workflow_job(
         )
 
 
+async def sync_repository_advisories(ctx: dict[str, Any]) -> None:
+    """Scheduled or manual job: list repository advisories, enqueue workflows, update watermarks."""
+    await run_repository_advisories_sync_from_worker_ctx(ctx)
+
+
 async def process_patch_oracle_job(
     ctx: dict[str, Any],
     *,
@@ -256,4 +265,8 @@ class WorkerSettings(WorkerSettingsBase):
     redis_settings = RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://localhost:6379"))
     on_startup: StartupShutdown | None = startup
     on_shutdown: StartupShutdown | None = shutdown
-    functions: Sequence[Any] = [process_advisory_workflow_job, process_patch_oracle_job]
+    functions: Sequence[Any] = [
+        process_advisory_workflow_job,
+        process_patch_oracle_job,
+        sync_repository_advisories,
+    ]

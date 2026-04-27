@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal, Self
 
@@ -113,6 +114,8 @@ class GitHubSCMProvider:
         *,
         state: str | None = None,
         severity: str | None = None,
+        max_pages: int = 20,
+        per_page: int = 30,
         finding_id: str | None = None,
         workflow_run_id: uuid.UUID | str | None = None,
     ) -> tuple[AdvisoryData, ...]:
@@ -122,9 +125,35 @@ class GitHubSCMProvider:
             name,
             state=state,
             severity=severity,
+            per_page=per_page,
+            max_pages=max_pages,
             finding_id=finding_id,
             workflow_run_id=workflow_run_id,
         )
+
+    async def iter_list_advisories(
+        self,
+        repo: str,
+        *,
+        state: str | None = None,
+        severity: str | None = None,
+        per_page: int = 30,
+        max_pages: int = 20,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | str | None = None,
+    ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
+        owner, name = _split_repo_slug(repo)
+        async for page in self._client.iter_repository_security_advisories(
+            owner,
+            name,
+            state=state,
+            severity=severity,
+            per_page=per_page,
+            max_pages=max_pages,
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        ):
+            yield page
 
     async def fetch_code_scanning_alerts(
         self,

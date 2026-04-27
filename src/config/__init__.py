@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal, Self
 
 import structlog
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from models import Severity, SSVCAction
@@ -130,6 +130,30 @@ class RepoConfig(BaseModel):
     governance: GovernanceConfig | None = None
     # Notified by the interactive Slack approval handler on escalation.
     approvers: list[GovernanceApprover] = Field(default_factory=list)
+    # Advisory list polling: empty list = no sync for this repo. Validated: never ``closed``.
+    advisory_poll_states: list[str] = Field(default_factory=list)
+    advisory_poll_max_enqueues_per_tick: int = Field(default=25, ge=0)
+    advisory_poll_max_pages: int = Field(default=5, ge=1)
+    advisory_poll_per_page: int = Field(default=100, ge=1, le=100)
+    advisory_poll_seed_without_enqueue: bool = False
+
+    @field_validator("advisory_poll_states", mode="before")
+    @classmethod
+    def _normalize_advisory_poll_states(cls, v: object) -> list[str] | object:
+        if v is None:
+            return []
+        if v == "":
+            return []
+        if not isinstance(v, list):
+            return v
+        return [str(x).strip().lower() for x in v]
+
+    @model_validator(mode="after")
+    def _advisory_poll_states_reject_closed(self) -> Self:
+        if "closed" in self.advisory_poll_states:
+            msg = "advisory_poll_states must not include 'closed'"
+            raise ValueError(msg)
+        return self
 
 
 class ReposManifest(BaseModel):
@@ -219,6 +243,12 @@ class Settings(BaseSettings):
 
     # Container runtime (Docker or Podman API socket for PoC sandbox execution)
     container_socket: str = "unix:///var/run/docker.sock"
+
+    # Advisory list polling: caps and shared sliding-window for ``advisory_poll`` (sync job only).
+    advisory_poll_max_enqueues_per_tick_global: int = Field(default=100, ge=0)
+    advisory_poll_rate_per_hour: int = Field(default=500, ge=1)
+    # Optional: poll interval in seconds, used for Redis dedup TTL in ``try_enqueue_advisory`` when set.
+    advisory_poll_interval_seconds: int | None = None
 
     @model_validator(mode="after")
     def _reject_dev_placeholders_in_production(self) -> Self:

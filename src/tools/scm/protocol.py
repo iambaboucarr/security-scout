@@ -43,6 +43,8 @@ class SCMProvider(Protocol):
         *,
         state: str | None = None,
         severity: str | None = None,
+        max_pages: int = 20,
+        per_page: int = 30,
         finding_id: str | None = None,
         workflow_run_id: uuid.UUID | str | None = None,
     ) -> tuple[AdvisoryData, ...]:
