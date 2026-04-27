@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -21,7 +22,9 @@ from models import (
 from tools.slack import SlackAPIError
 from worker import (
     WorkerSettings,
+    _advisory_sync_cron_jobs,
     _patch_oracle_failure_reply_text,
+    configure_worker_cron_jobs,
     process_advisory_workflow_job,
     process_patch_oracle_job,
     shutdown,
@@ -46,6 +49,30 @@ def test_worker_settings_registers_advisory_job() -> None:
     assert process_patch_oracle_job in WorkerSettings.functions
     assert WorkerSettings.on_startup is not None
     assert WorkerSettings.on_shutdown is not None
+
+
+@pytest.mark.filterwarnings("ignore:.*iscoroutinefunction.*:DeprecationWarning")
+def test_worker_settings_utc_timezone_and_cron_built_for_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert WorkerSettings.timezone is UTC
+    assert WorkerSettings.cron_jobs == ()
+    prev_cron = WorkerSettings.cron_jobs
+    try:
+        monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+        configure_worker_cron_jobs()
+        assert len(WorkerSettings.cron_jobs) == 1
+        cj = WorkerSettings.cron_jobs[0]
+        assert cj.name == "sync_repository_advisories"
+        assert cj.minute == 0
+        assert cj.hour is None
+        assert cj.unique is True
+        assert cj.max_tries == 1
+        jobs_direct = _advisory_sync_cron_jobs()
+        assert len(jobs_direct) == 1
+        assert jobs_direct[0].name == cj.name
+    finally:
+        WorkerSettings.cron_jobs = prev_cron
 
 
 @pytest.mark.asyncio

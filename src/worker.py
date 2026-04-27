@@ -5,11 +5,13 @@ import os
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from datetime import timezone as _DatetimeTimezone
 from typing import Any, Literal
 
 import httpx
 import structlog
 from arq.connections import RedisSettings
+from arq.cron import CronJob, cron
 from arq.typing import StartupShutdown, WorkerSettingsBase
 from redis.exceptions import RedisError
 
@@ -20,6 +22,8 @@ from ai.provider import LLMProvider
 from config import (
     AdvisoryPollInterval,
     Settings,
+    advisory_poll_cron_minute_and_hour,
+    advisory_poll_interval_from_env,
     advisory_polling_schedule_requested,
     configure_logging,
     load_app_config,
@@ -305,13 +309,45 @@ async def process_patch_oracle_job(
             )
 
 
+def _advisory_sync_cron_jobs() -> list[CronJob]:
+    preset = advisory_poll_interval_from_env()
+    if preset == AdvisoryPollInterval.disabled:
+        return []
+    fields = advisory_poll_cron_minute_and_hour(preset)
+    if fields is None:
+        return []
+    minute, hour = fields
+    return [
+        cron(
+            sync_repository_advisories,
+            name="sync_repository_advisories",
+            unique=True,
+            max_tries=1,
+            minute=minute,
+            hour=hour,
+        )
+    ]
+
+
+def configure_worker_cron_jobs() -> None:
+    """Set :attr:`WorkerSettings.cron_jobs` from the current process environment.
+
+    Call once per worker process after optional ``.env`` loading (e.g. from ``run_worker`` ``main``)
+    so ``ADVISORY_POLL_INTERVAL`` matches :class:`Settings` without building cron schedules at
+    ``worker`` import time.
+    """
+    WorkerSettings.cron_jobs = tuple(_advisory_sync_cron_jobs())
+
+
 class WorkerSettings(WorkerSettingsBase):
     # Use REDIS_URL env (same as Settings.redis_url) so importing this module does not require all app secrets.
     redis_settings = RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://localhost:6379"))
     on_startup: StartupShutdown | None = startup
     on_shutdown: StartupShutdown | None = shutdown
+    timezone: _DatetimeTimezone = UTC
     functions: Sequence[Any] = [
         process_advisory_workflow_job,
         process_patch_oracle_job,
         sync_repository_advisories,
     ]
+    cron_jobs: Sequence[CronJob] = ()

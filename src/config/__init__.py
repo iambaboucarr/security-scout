@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -42,6 +43,46 @@ _ADVISORY_POLL_INTERVAL_SECONDS: dict[AdvisoryPollInterval, int] = {
     AdvisoryPollInterval.every_4_hours: 14_400,
     AdvisoryPollInterval.daily: 86_400,
 }
+
+# ``arq.cron`` uses ``int`` (single), ``set[int]`` (allowlist), or ``None`` (any) for
+# ``minute=`` / ``hour=`` (see arq `CronJob` / `next_cron`).
+
+
+def advisory_poll_cron_minute_and_hour(
+    preset: AdvisoryPollInterval,
+) -> tuple[int | set[int] | None, int | set[int] | None] | None:
+    """Return ``(minute, hour)`` for :func:`arq.cron.cron`, or ``None`` when not scheduled.
+
+    All presets are evaluated in the worker's configured timezone (use ``WorkerSettings`` with
+    :obj:`datetime.UTC` for the advisory sync tick).
+    """
+    if preset == AdvisoryPollInterval.disabled:
+        return None
+    if preset == AdvisoryPollInterval.every_5_min:
+        return (set(range(0, 60, 5)), None)
+    if preset == AdvisoryPollInterval.every_15_min:
+        return ({0, 15, 30, 45}, None)
+    if preset == AdvisoryPollInterval.hourly:
+        return (0, None)
+    if preset == AdvisoryPollInterval.every_4_hours:
+        return (0, {0, 4, 8, 12, 16, 20})
+    if preset == AdvisoryPollInterval.daily:
+        return (0, 0)
+    return None  # pragma: no cover - StrEnum is exhaustive for known values
+
+
+def advisory_poll_interval_from_env() -> AdvisoryPollInterval:
+    """Read ``ADVISORY_POLL_INTERVAL`` for ARQ cron scheduling without instantiating :class:`Settings`.
+
+    Uses only ``os.environ`` so :func:`worker.configure_worker_cron_jobs` can run after ``.env`` is
+    loaded. Invalid values map to ``disabled``. Tests and imports that never call that helper see no
+    scheduled advisory sync until the worker entrypoint configures cron jobs.
+    """
+    raw = os.environ.get("ADVISORY_POLL_INTERVAL", AdvisoryPollInterval.disabled.value)
+    try:
+        return AdvisoryPollInterval(raw)
+    except ValueError:
+        return AdvisoryPollInterval.disabled
 
 
 class RateLimits(BaseModel):

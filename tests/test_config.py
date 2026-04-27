@@ -13,6 +13,8 @@ from config import (
     RepoMode,
     ReposManifest,
     Settings,
+    advisory_poll_cron_minute_and_hour,
+    advisory_poll_interval_from_env,
     advisory_polling_schedule_requested,
     compute_repos_yaml_sha256,
     configure_logging,
@@ -425,6 +427,33 @@ def test_advisory_polling_schedule_requested() -> None:
     assert advisory_polling_schedule_requested(s_on, ReposManifest(repos=[repo_default_poll])) is True
 
 
+def test_advisory_poll_cron_minute_and_hour_mapping() -> None:
+    assert advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.disabled) is None
+    m5 = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.every_5_min)
+    assert m5 is not None
+    assert m5[0] == set(range(0, 60, 5))
+    assert m5[1] is None
+    m15 = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.every_15_min)
+    assert m15 == ({0, 15, 30, 45}, None)
+    h = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.hourly)
+    assert h == (0, None)
+    h4 = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.every_4_hours)
+    assert h4 == (0, {0, 4, 8, 12, 16, 20})
+    d = advisory_poll_cron_minute_and_hour(AdvisoryPollInterval.daily)
+    assert d == (0, 0)
+
+
+def test_advisory_poll_interval_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ADVISORY_POLL_INTERVAL", raising=False)
+    assert advisory_poll_interval_from_env() is AdvisoryPollInterval.disabled
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "hourly")
+    assert advisory_poll_interval_from_env() is AdvisoryPollInterval.hourly
+    monkeypatch.setenv("ADVISORY_POLL_INTERVAL", "not_a_preset")
+    assert advisory_poll_interval_from_env() is AdvisoryPollInterval.disabled
+
+
 def test_repo_config_default_git_ref_can_be_master() -> None:
     repo = RepoConfig(
         name="svc",
@@ -460,7 +489,9 @@ def test_settings_tracker_credentials_default_none() -> None:
     assert s.linear_api_key is None
 
 
-def test_settings_reads_secrets_from_directory(tmp_path: Path) -> None:
+def test_settings_reads_secrets_from_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("GITHUB_PAT", "SLACK_BOT_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
     (tmp_path / "github_pat").write_text("ghp_secret_from_file", encoding="utf-8")
     (tmp_path / "slack_bot_token").write_text("xoxb-from-file", encoding="utf-8")
     s = Settings(
