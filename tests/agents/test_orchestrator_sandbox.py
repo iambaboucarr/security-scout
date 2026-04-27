@@ -128,14 +128,14 @@ async def test_sandbox_happy_path_confirmed_low(db_session, mocker, tmp_path) ->
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         return_value=_env_result(tmp_path),
     )
     mocker.patch(
-        "agents.orchestrator.execute_poc",
+        "agents.orchestrator.sandbox_phase.execute_poc",
         new_callable=AsyncMock,
         return_value=_exec_result_confirmed_low(),
     )
@@ -184,14 +184,14 @@ async def test_sandbox_error_tier_proceeds_to_reporting(db_session, mocker, tmp_
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         return_value=_env_result(tmp_path),
     )
     mocker.patch(
-        "agents.orchestrator.execute_poc",
+        "agents.orchestrator.sandbox_phase.execute_poc",
         new_callable=AsyncMock,
         return_value=_exec_result_error(),
     )
@@ -225,9 +225,9 @@ async def test_env_build_permanent_error(db_session, mocker, tmp_path) -> None:
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         side_effect=PermanentError("docker build failed"),
     )
@@ -262,9 +262,9 @@ async def test_env_build_transient_error_retries(db_session, mocker, tmp_path) -
     async def fake_retry(params):
         retries.append(params)
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         side_effect=TransientError("network flake"),
     )
@@ -300,9 +300,9 @@ async def test_env_build_transient_security_scout_error_retries(db_session, mock
     async def fake_retry(params):
         retries.append(params)
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         side_effect=CloneError("git fetch timed out", is_transient=True),
     )
@@ -349,14 +349,14 @@ async def test_resume_executing_sandbox_rebuilds_env(db_session, mocker, tmp_pat
     db_session.add(wr)
     await db_session.commit()
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     build_mock = mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         return_value=_env_result(tmp_path),
     )
     mocker.patch(
-        "agents.orchestrator.execute_poc",
+        "agents.orchestrator.sandbox_phase.execute_poc",
         new_callable=AsyncMock,
         return_value=_exec_result_confirmed_low(),
     )
@@ -391,14 +391,14 @@ async def test_sandbox_execution_exception(db_session, mocker, tmp_path) -> None
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         return_value=_env_result(tmp_path),
     )
     mocker.patch(
-        "agents.orchestrator.execute_poc",
+        "agents.orchestrator.sandbox_phase.execute_poc",
         new_callable=AsyncMock,
         side_effect=RuntimeError("container crashed"),
     )
@@ -423,14 +423,14 @@ async def test_sandbox_execute_notimplemented_maps_to_error_sandbox(db_session, 
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         return_value=_env_result(tmp_path),
     )
     mocker.patch(
-        "agents.orchestrator.execute_poc",
+        "agents.orchestrator.sandbox_phase.execute_poc",
         new_callable=AsyncMock,
         side_effect=NotImplementedError("run_container is not implemented yet"),
     )
@@ -460,8 +460,8 @@ async def test_no_poc_skips_sandbox(db_session, mocker) -> None:
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
-    build_mock = mocker.patch("agents.orchestrator.build_environment", new_callable=AsyncMock)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
+    build_mock = mocker.patch("agents.orchestrator.sandbox_phase.build_environment", new_callable=AsyncMock)
 
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
@@ -488,21 +488,21 @@ async def test_sandbox_metric_emitted(db_session, mocker, tmp_path) -> None:
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.build_environment",
+        "agents.orchestrator.sandbox_phase.build_environment",
         new_callable=AsyncMock,
         return_value=_env_result(tmp_path),
     )
     mocker.patch(
-        "agents.orchestrator.execute_poc",
+        "agents.orchestrator.sandbox_phase.execute_poc",
         new_callable=AsyncMock,
         return_value=_exec_result_confirmed_low(),
     )
 
     log_calls = []
     mocker.patch(
-        "agents.orchestrator._LOG",
+        "agents.orchestrator.pipeline._LOG",
         **{
             "bind.return_value": MagicMock(
                 info=lambda *a, **kw: log_calls.append(("info", kw)),

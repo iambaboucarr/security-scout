@@ -212,7 +212,7 @@ class TestSlackApprovalEndToEnd:
         → run.state=done, finding.approved_by set, thread reply posted,
         TriageAccuracy recorded.
         """
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         governance = GovernanceConfig(approve=[GovernanceRule(severity=[Severity.high])])
         repo = _base_repo(governance=governance, approvers=[GovernanceApprover(slack_user="U0LEADAPPRV")])
@@ -292,7 +292,7 @@ class TestSlackApprovalEndToEnd:
         """Orchestrator parks → reject click → finding marked false_positive,
         run done, thread reply says 'Rejected'.
         """
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         governance = GovernanceConfig(approve=[GovernanceRule(severity=[Severity.high])])
         repo = _base_repo(governance=governance)
@@ -343,7 +343,7 @@ class TestSlackApprovalEndToEnd:
     @pytest.mark.asyncio
     async def test_escalate_flow_keeps_run_open_and_dms_approvers(self, db_session, mocker) -> None:
         """Escalate keeps the run in awaiting_approval and DMs configured approvers."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         approvers = [
             GovernanceApprover(slack_user="U0SECENG01"),
@@ -392,7 +392,7 @@ class TestSlackApprovalEndToEnd:
     @pytest.mark.asyncio
     async def test_double_click_returns_already_resolved(self, db_session, mocker) -> None:
         """Clicking approve twice returns already_resolved on the second click."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         governance = GovernanceConfig(approve=[GovernanceRule(severity=[Severity.high])])
         repo = _base_repo(governance=governance)
@@ -455,7 +455,7 @@ class TestGovernanceRoutingEndToEnd:
     async def test_auto_resolve_skips_slack_and_marks_done(self, db_session, mocker) -> None:
         """auto_resolve tier: informational severity with default governance → done
         immediately, no Slack message sent."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding_informational)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding_informational)
 
         repo = _base_repo()
         slack = MagicMock()
@@ -495,7 +495,7 @@ class TestGovernanceRoutingEndToEnd:
     @pytest.mark.asyncio
     async def test_auto_resolve_with_explicit_governance_rule(self, db_session, mocker) -> None:
         """Explicit auto_resolve rule for low severity skips Slack."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding_low)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding_low)
 
         governance = GovernanceConfig(auto_resolve=[GovernanceRule(severity=[Severity.low])])
         repo = _base_repo(governance=governance)
@@ -520,7 +520,7 @@ class TestGovernanceRoutingEndToEnd:
     @pytest.mark.asyncio
     async def test_notify_tier_sends_informational_slack_and_completes(self, db_session, mocker) -> None:
         """Notify tier sends Slack message as informational (no buttons) → done."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         governance = GovernanceConfig(notify=[GovernanceRule(severity=[Severity.high])])
         repo = _base_repo(governance=governance)
@@ -533,7 +533,7 @@ class TestGovernanceRoutingEndToEnd:
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         http = httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok())
-        mocker.patch("agents.orchestrator.finding_to_report_payload", return_value=MagicMock())
+        mocker.patch("agents.orchestrator.reporting.finding_to_report_payload", return_value=MagicMock())
         async with http:
             run = await run_advisory_workflow(
                 db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
@@ -550,7 +550,7 @@ class TestGovernanceRoutingEndToEnd:
     @pytest.mark.asyncio
     async def test_approve_tier_parks_at_awaiting_approval(self, db_session, mocker) -> None:
         """Approve tier sends Slack with buttons → parks at awaiting_approval."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         governance = GovernanceConfig(approve=[GovernanceRule(severity=[Severity.high])])
         repo = _base_repo(governance=governance)
@@ -570,7 +570,7 @@ class TestGovernanceRoutingEndToEnd:
     @pytest.mark.asyncio
     async def test_default_governance_sends_high_to_approve(self, db_session, mocker) -> None:
         """No governance block → high severity defaults to approve tier."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         repo = _base_repo(governance=None)
 
@@ -587,7 +587,7 @@ class TestGovernanceRoutingEndToEnd:
     @pytest.mark.asyncio
     async def test_approve_takes_precedence_over_auto_resolve(self, db_session, mocker) -> None:
         """When both approve and auto_resolve rules match, approve wins (strictest)."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         governance = GovernanceConfig(
             approve=[GovernanceRule(severity=[Severity.high])],
@@ -608,7 +608,7 @@ class TestGovernanceRoutingEndToEnd:
     @pytest.mark.asyncio
     async def test_governance_audit_trail_logged(self, db_session, mocker) -> None:
         """Every governance decision is logged to AgentActionLog."""
-        mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+        mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
         governance = GovernanceConfig(notify=[GovernanceRule(severity=[Severity.high])])
         repo = _base_repo(governance=governance)
@@ -619,7 +619,7 @@ class TestGovernanceRoutingEndToEnd:
 
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
-        mocker.patch("agents.orchestrator.finding_to_report_payload", return_value=MagicMock())
+        mocker.patch("agents.orchestrator.reporting.finding_to_report_payload", return_value=MagicMock())
         http = httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok())
         async with http:
             run = await run_advisory_workflow(

@@ -80,7 +80,7 @@ async def test_workflow_happy_path_completes(db_session, mocker) -> None:
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
@@ -99,7 +99,7 @@ async def test_workflow_happy_path_completes(db_session, mocker) -> None:
 async def test_github_transient_schedules_retry(db_session, mocker) -> None:
     repo = _repo()
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=GitHubAPIError("upstream", is_transient=True, http_status=503),
     )
     schedule = AsyncMock()
@@ -130,7 +130,7 @@ async def test_github_transient_schedules_retry(db_session, mocker) -> None:
 async def test_github_permanent_error_triage_terminal(db_session, mocker) -> None:
     repo = _repo()
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=GitHubAPIError("bad request", is_transient=False, http_status=400),
     )
     notify = AsyncMock()
@@ -158,7 +158,7 @@ async def test_github_permanent_error_triage_terminal(db_session, mocker) -> Non
 @pytest.mark.asyncio
 async def test_circuit_github_blocks_before_triage(db_session, mocker) -> None:
     repo = _repo()
-    triage = mocker.patch("agents.orchestrator.run_advisory_triage")
+    triage = mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage")
     t = [0.0]
 
     def clock() -> float:
@@ -205,7 +205,7 @@ async def test_slack_transient_schedules_retry(db_session, mocker) -> None:
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     post_calls = [0]
 
@@ -259,13 +259,13 @@ async def test_advisory_to_slack_seconds_metric_emitted(db_session, mocker) -> N
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
         slack = SlackClient("xoxb-test", client=http)
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
-        with patch("agents.orchestrator._LOG") as mock_log:
+        with patch("agents.orchestrator.pipeline._LOG") as mock_log:
             mock_log.bind.return_value = mock_log
             run = await run_advisory_workflow(
                 db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
@@ -308,7 +308,7 @@ async def test_auto_resolve_tier_skips_slack_and_finishes(db_session, mocker) ->
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     slack_calls: list[httpx.Request] = []
 
@@ -357,7 +357,7 @@ async def test_notify_tier_posts_slack_and_finishes(db_session, mocker) -> None:
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     repo = _repo(
         governance=GovernanceConfig(notify=[GovernanceRule(severity=[Severity.medium])]),
@@ -402,7 +402,7 @@ async def test_approve_tier_parks_in_awaiting_approval(db_session, mocker) -> No
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     repo = _repo(
         governance=GovernanceConfig(approve=[GovernanceRule(severity=[Severity.critical])]),
@@ -447,7 +447,7 @@ async def test_default_governance_parks_high_severity_in_awaiting_approval(db_se
         await session.flush()
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     # Explicitly pass RepoConfig without governance to exercise the default.
     repo_no_gov = RepoConfig(

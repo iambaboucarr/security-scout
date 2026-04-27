@@ -11,10 +11,12 @@ from agents.orchestrator import (
     AdvisoryWorkflowParams,
     AdvisoryWorkflowState,
     ScheduleRetryParams,
+    run_advisory_workflow,
+)
+from agents.orchestrator._workflow_helpers import (
     _best_effort_error_slack,
     _safe_exc_detail,
     _truncate_log,
-    run_advisory_workflow,
 )
 from config import GovernanceConfig, GovernanceRule, RepoConfig
 from exceptions import SecurityScoutError
@@ -207,7 +209,7 @@ async def test_resume_triage_complete_with_no_finding_raises(db_session) -> None
 @pytest.mark.asyncio
 async def test_security_scout_error_transient_schedules_retry(db_session, mocker) -> None:
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=SecurityScoutError("transient issue", is_transient=True),
     )
     schedule = AsyncMock()
@@ -236,7 +238,7 @@ async def test_security_scout_error_transient_schedules_retry(db_session, mocker
 @pytest.mark.asyncio
 async def test_security_scout_error_permanent_terminal(db_session, mocker) -> None:
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=SecurityScoutError("bad data", is_transient=False),
     )
 
@@ -261,7 +263,7 @@ async def test_security_scout_error_permanent_terminal(db_session, mocker) -> No
 @pytest.mark.asyncio
 async def test_unrecoverable_exception_during_triage(db_session, mocker) -> None:
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=RuntimeError("unexpected kaboom"),
     )
 
@@ -295,7 +297,7 @@ async def test_slack_permanent_error_terminal(db_session, mocker) -> None:
         f = await _make_finding(session)
         return f
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     def fail_handler(request: httpx.Request) -> httpx.Response:
         if "chat.postMessage" in str(request.url):
@@ -320,9 +322,9 @@ async def test_slack_malformed_response_terminal(db_session, mocker) -> None:
     async def fake_triage(session, *a, **kw):
         return await _make_finding(session)
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.finding_to_report_payload",
+        "agents.orchestrator.reporting.finding_to_report_payload",
         return_value=MagicMock(),
     )
 
@@ -347,9 +349,9 @@ async def test_unrecoverable_exception_during_reporting(db_session, mocker) -> N
     async def fake_triage(session, *a, **kw):
         return await _make_finding(session)
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
     mocker.patch(
-        "agents.orchestrator.finding_to_report_payload",
+        "agents.orchestrator.reporting.finding_to_report_payload",
         return_value=MagicMock(),
     )
 
@@ -492,7 +494,7 @@ async def test_github_transient_opens_circuit_breaker(db_session, mocker) -> Non
         breaker.record_failure("github")
 
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=GitHubAPIError("upstream fail", is_transient=True, http_status=503),
     )
 
@@ -527,7 +529,7 @@ async def test_slack_transient_opens_circuit_breaker(db_session, mocker) -> None
     async def fake_triage(session, *a, **kw):
         return await _make_finding(session)
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     t = [0.0]
     breaker = ExternalApiCircuitBreaker(now_fn=lambda: t[0])
@@ -587,7 +589,7 @@ def test_safe_exc_detail_preserves_custom_exception_type() -> None:
 async def test_slack_notify_on_triage_failure_excludes_exception_message(db_session, mocker) -> None:
     secret_msg = "db-password=hunter2 /home/ci/app/.env"
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=SecurityScoutError(secret_msg, is_transient=False),
     )
 
@@ -634,7 +636,7 @@ async def test_circuit_breaker_resume_logged_on_workflow_start(db_session, mocke
     async def fake_triage(session, *a, **kw):
         return await _make_finding(session)
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=fake_triage)
 
     t = [0.0]
     breaker = ExternalApiCircuitBreaker(now_fn=lambda: t[0])

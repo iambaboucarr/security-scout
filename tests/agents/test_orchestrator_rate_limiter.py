@@ -17,12 +17,12 @@ import pytest
 from sqlalchemy import select
 
 from agents.orchestrator import (
-    _RATE_LIMIT_RETRY_SECONDS,
     AdvisoryWorkflowParams,
     AdvisoryWorkflowState,
     ScheduleRetryParams,
     run_advisory_workflow,
 )
+from agents.orchestrator._constants import _RATE_LIMIT_RETRY_SECONDS
 from config import GovernanceConfig, GovernanceRule, RepoConfig
 from models import AgentActionLog, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind, WorkflowRun
 from tools.github import GitHubClient
@@ -79,7 +79,7 @@ async def _make_finding(session: object, *_a: object, **_k: object) -> Finding:
 @pytest.mark.asyncio
 async def test_rate_limiter_circuit_open_defers_with_schedule_retry(db_session, mocker) -> None:
     """When the rate limiter circuit is open, the workflow defers via schedule_retry."""
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
     rl = AsyncMock(spec=SlidingWindowRateLimiter)
     rl.check_and_increment = AsyncMock(
@@ -118,7 +118,7 @@ async def test_rate_limiter_circuit_open_defers_with_schedule_retry(db_session, 
 @pytest.mark.asyncio
 async def test_rate_limiter_circuit_open_no_schedule_retry_raises(db_session, mocker) -> None:
     """RateLimiterCircuitOpen without schedule_retry raises RuntimeError."""
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
     rl = AsyncMock(spec=SlidingWindowRateLimiter)
     rl.check_and_increment = AsyncMock(
@@ -147,7 +147,7 @@ async def test_rate_limiter_circuit_open_no_schedule_retry_raises(db_session, mo
 @pytest.mark.asyncio
 async def test_rate_limit_exceeded_schedules_retry(db_session, mocker) -> None:
     """When rate limit is exceeded with schedule_retry available, workflow defers."""
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
     rl = AsyncMock(spec=SlidingWindowRateLimiter)
     rl.check_and_increment = AsyncMock(
@@ -198,7 +198,7 @@ async def test_rate_limit_exceeded_schedules_retry(db_session, mocker) -> None:
 @pytest.mark.asyncio
 async def test_rate_limit_exceeded_no_retry_goes_to_error_reporting(db_session, mocker) -> None:
     """Without schedule_retry, RateLimitExceeded marks the run as error_reporting."""
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
     rl = AsyncMock(spec=SlidingWindowRateLimiter)
     rl.check_and_increment = AsyncMock(
@@ -259,7 +259,7 @@ async def test_rate_limiter_skipped_when_resuming_at_reporting(db_session, mocke
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
-        mocker.patch("agents.orchestrator.finding_to_report_payload", return_value=MagicMock())
+        mocker.patch("agents.orchestrator.reporting.finding_to_report_payload", return_value=MagicMock())
         run = await run_advisory_workflow(
             db_session,
             _repo(),
@@ -279,7 +279,7 @@ async def test_rate_limiter_skipped_when_resuming_at_reporting(db_session, mocke
 @pytest.mark.asyncio
 async def test_rate_limiter_allows_and_workflow_completes(db_session, mocker) -> None:
     """When rate limiter allows, the workflow proceeds normally to done."""
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_make_finding)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_make_finding)
 
     rl = AsyncMock(spec=SlidingWindowRateLimiter)
     rl.check_and_increment = AsyncMock(return_value=None)
@@ -290,7 +290,7 @@ async def test_rate_limiter_allows_and_workflow_completes(db_session, mocker) ->
         slack.notify_workflow_error = AsyncMock()
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
-        mocker.patch("agents.orchestrator.finding_to_report_payload", return_value=MagicMock())
+        mocker.patch("agents.orchestrator.reporting.finding_to_report_payload", return_value=MagicMock())
         run = await run_advisory_workflow(
             db_session,
             _repo(),
