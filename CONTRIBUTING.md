@@ -48,6 +48,13 @@ chore(ci): pin action digests for zizmor
 - Keep commits **atomic** when practical: one logical change per commit.
 - Do not commit secrets; `.env` stays local (see `.env.example`).
 
+## Tests (pytest vs Make)
+
+- **`make test`** passes **`-m "not postgres"`**, so you do not need Postgres for the default loop.
+- **`uv run pytest`** with **no `-m`** collects **every** test, including **`@pytest.mark.postgres`**, which **`pytest.fail`**s if **`POSTGRES_TEST_URL`** is unset. For IDE “run all tests” without Postgres, use **`-m "not postgres"`** (or set **`POSTGRES_TEST_URL`**).
+- Pytest **AND**s multiple **`-m`** expressions; the Makefile uses explicit **`-m`** flags instead of putting **`not postgres`** in **`addopts`** so **`pytest -m postgres`** still works.
+- **`make testslow`** / **`make testintegration`** do not exclude **`postgres`**. If a test is marked **`slow`** or **`integration`** and **`postgres`**, run **`make services`** (or set **`POSTGRES_TEST_URL`**) before that target.
+
 ## Further reading
 
 | Resource                                                                                                                           | Role                                                                   |

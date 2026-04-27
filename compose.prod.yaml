@@ -82,6 +82,7 @@ services:
       resources:
         limits:
           memory: 128M
+          pids: 128
 
   app:
     <<: *app-common
@@ -116,6 +117,7 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+          pids: 256
         reservations:
           memory: 128M
 
@@ -132,6 +134,7 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+          pids: 256
         reservations:
           memory: 128M
 
@@ -166,6 +169,7 @@ services:
       resources:
         limits:
           memory: 512M
+          pids: 128
 
   redis:
     image: redis:7.4-alpine@sha256:4bfd9eca23339865dc14fe75f6d9ae643f714924623978dd2798f1a673b08f43
@@ -203,6 +207,7 @@ services:
       resources:
         limits:
           memory: 320M
+          pids: 128
 
   migrate:
     <<: *app-common

@@ -160,7 +160,7 @@ timeout = 30
 markers = [
     "slow: sandbox/Docker tests (deselect with -m 'not slow')",
     "integration: tests requiring external services (Redis, DB)",
-    "postgres: tests requiring PostgreSQL (run via make check / pytest -m postgres; see POSTGRES_TEST_URL)",
+    "postgres: tests requiring PostgreSQL and POSTGRES_TEST_URL (make check / make testpostgres; plain pytest needs -m 'not postgres' or the env — see CONTRIBUTING)",
 ]
 addopts = "-x --strict-markers"
 
