@@ -47,6 +47,18 @@ sandbox/
 documentation/
 ```
 
+## Documentation
+
+| Doc | Scope |
+|-----|--------|
+| [documentation/architecture.md](documentation/architecture.md) | Workflows, agents, state machine, tool access |
+| [documentation/build-plan.md](documentation/build-plan.md) | Phased roadmap and deliverables |
+| [documentation/decisions.md](documentation/decisions.md) | Architecture decisions (ADRs) |
+| [documentation/tool-integrations.md](documentation/tool-integrations.md) | GitHub, Slack, webhooks, external APIs |
+| [documentation/advisory-triage-polling-plan.md](documentation/advisory-triage-polling-plan.md) | **Optional** REST polling for triage/draft advisories (supplements webhooks) |
+| [documentation/deployment-compose.md](documentation/deployment-compose.md) | Docker Compose deployment |
+| [documentation/deployment-guide.md](documentation/deployment-guide.md) | VPS / bare-metal deployment |
+
 ## License
 
 [Apache License 2.0](LICENSE) — see [NOTICE](NOTICE) for attribution.
