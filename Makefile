@@ -47,14 +47,14 @@ typecheck:
 	uv run mypy src/
 
 test:
-	uv run pytest -x -n auto -m "not postgres"
+	uv run pytest -x -n auto --dist loadgroup -m "not postgres"
 
 testcov:
-	uv run pytest -x -n auto -m "not postgres" --cov=src --cov-report=term-missing
-	uv run pytest -x -n auto -m postgres --cov=src --cov-append --cov-report=term-missing
+	uv run pytest -x -n auto --dist loadgroup -m "not postgres" --cov=src --cov-report=term-missing
+	uv run pytest -x -n auto --dist loadgroup -m postgres --cov=src --cov-append --cov-report=term-missing
 
 testpostgres:
-	uv run pytest -x -n auto -m postgres
+	uv run pytest -x -n auto --dist loadgroup -m postgres
 
 testslow:
 	uv run pytest -m slow
