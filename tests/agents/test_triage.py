@@ -121,6 +121,27 @@ def test_github_actions_ecosystem_resolves_owner_repo() -> None:
     assert repo == "checkout"
 
 
+def test_fetch_advisory_repo_arg_repository_vs_global() -> None:
+    assert triage_mod._fetch_advisory_repo_arg("repository", "acme/app") == "acme/app"
+    assert triage_mod._fetch_advisory_repo_arg("global", "acme/app") is None
+
+
+def test_patched_ref_candidates_normalises_v_prefix() -> None:
+    base = {
+        "ghsa_id": "GHSA-X",
+        "source": "global",
+        "summary": "s",
+        "description": "d",
+    }
+    assert triage_mod._patched_ref_candidates(AdvisoryData(**base, first_patched_version=None)) == []
+    assert triage_mod._patched_ref_candidates(AdvisoryData(**base, first_patched_version="   ")) == []
+    assert triage_mod._patched_ref_candidates(AdvisoryData(**base, first_patched_version="2.1.0")) == [
+        "2.1.0",
+        "v2.1.0",
+    ]
+    assert triage_mod._patched_ref_candidates(AdvisoryData(**base, first_patched_version="v3.0.0")) == ["v3.0.0"]
+
+
 @pytest.mark.asyncio
 async def test_run_advisory_triage_persists_finding(db_session) -> None:
     payload = {
@@ -224,6 +245,91 @@ async def test_run_advisory_triage_llm_refinement_uses_sanitised_prompt(db_sessi
     user_blocks = call_kw["messages"][0]["content"]
     assert "external_content" in user_blocks
     assert "advisory_text" in user_blocks
+
+
+@pytest.mark.asyncio
+async def test_run_advisory_triage_skips_llm_when_confidence_already_high(db_session) -> None:
+    payload = {
+        "ghsa_id": "GHSA-ABCD-EFGH-IJKL",
+        "summary": "SQL injection",
+        "description": "A proof of concept is available.",
+        "severity": "high",
+        "html_url": "https://github.com/advisories/GHSA-ABCD-EFGH-IJKL",
+        "identifiers": [{"type": "CVE", "value": "CVE-2024-5000"}],
+        "cwes": [{"cwe_id": "CWE-89", "name": "SQL"}],
+        "published_at": "2024-06-01T00:00:00Z",
+        "updated_at": None,
+        "cvss": {
+            "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "score": 9.8,
+        },
+        "vulnerabilities": [{"package": {"ecosystem": "npm", "name": "some-pkg"}}],
+    }
+
+    def gh_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    def osv_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"vulns": []})
+
+    mock_llm = AsyncMock()
+
+    async with _transport(httpx.MockTransport(gh_handler)) as gh_http:
+        gh = GitHubClient("token", client=gh_http)
+        scm = GitHubSCMProvider.from_client(gh)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(osv_handler)) as osv_http:
+            await run_advisory_triage(
+                db_session,
+                _repo(),
+                scm,
+                osv_http,
+                ghsa_id="GHSA-ABCD-EFGH-IJKL",
+                llm=mock_llm,
+            )
+
+    mock_llm.complete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_advisory_triage_ignores_llm_when_response_unusable(db_session) -> None:
+    payload = {
+        "ghsa_id": "GHSA-ABCD-EFGH-IJKL",
+        "summary": "Borderline",
+        "description": "Unclear impact.",
+        "severity": "medium",
+        "identifiers": [],
+        "cwes": [],
+    }
+
+    def gh_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    def osv_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"vulns": []})
+
+    from ai.provider import CompletionResult, TokenUsage
+
+    mock_llm = AsyncMock()
+    mock_llm.complete = AsyncMock(
+        return_value=CompletionResult(text="not valid json", usage=TokenUsage(input_tokens=1, output_tokens=1)),
+    )
+    mock_llm.capabilities = MagicMock(return_value=frozenset())
+
+    async with _transport(httpx.MockTransport(gh_handler)) as gh_http:
+        gh = GitHubClient("token", client=gh_http)
+        scm = GitHubSCMProvider.from_client(gh)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(osv_handler)) as osv_http:
+            row = await run_advisory_triage(
+                db_session,
+                _repo(),
+                scm,
+                osv_http,
+                ghsa_id="GHSA-ABCD-EFGH-IJKL",
+                llm=mock_llm,
+            )
+
+    mock_llm.complete.assert_awaited_once()
+    assert row.ssvc_action == SSVCAction.attend
 
 
 def test_github_severity_mapping() -> None:

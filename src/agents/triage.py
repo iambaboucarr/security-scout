@@ -440,6 +440,110 @@ def _first_cwe_id(advisory: AdvisoryData) -> str | None:
     return advisory.cwe_ids[0]
 
 
+def _fetch_advisory_repo_arg(
+    advisory_source: Literal["repository", "global"],
+    repo_slug: str,
+) -> str | None:
+    if advisory_source == "repository":
+        return repo_slug
+    return None
+
+
+def _exclude_osv_ids(ghsa: str, cve_id: str | None, advisory: AdvisoryData) -> set[str]:
+    out: set[str] = {ghsa.upper()}
+    if cve_id:
+        out.add(cve_id.upper())
+    out.update(x.upper() for x in advisory.cve_ids)
+    return out
+
+
+def _patched_ref_candidates(advisory: AdvisoryData) -> list[str]:
+    raw = advisory.first_patched_version
+    if not raw:
+        return []
+    v = raw.strip()
+    if not v:
+        return []
+    out = [v]
+    if v.lower().startswith("v"):
+        return out
+    tagged = f"v{v}"
+    if tagged not in out:
+        out.append(tagged)
+    return out
+
+
+def _duplicate_fields_from_dedup(
+    accepted_risk_hit: TrackerMatch | None,
+    dedup_matches: Sequence[TrackerMatch],
+) -> tuple[str | None, str | None, str | None, KnownStatus | None]:
+    if accepted_risk_hit is not None:
+        primary: TrackerMatch | None = accepted_risk_hit
+    elif dedup_matches:
+        primary = dedup_matches[0]
+    else:
+        primary = None
+    if primary is None:
+        return None, None, None, None
+    known: KnownStatus | None = None
+    if accepted_risk_hit is not None:
+        known = KnownStatus.known_accepted_risk
+    return primary.issue_id, primary.tracker, primary.issue_url, known
+
+
+def _build_finding_evidence(
+    ghsa: str,
+    advisory_source: Literal["repository", "global"],
+    exploitation: Literal["none", "poc", "active"],
+    health: DependencyHealthSignals,
+    dedup_matches: Sequence[TrackerMatch],
+    default_git_ref: str,
+    patched_candidates: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "ghsa_id": ghsa,
+        "advisory_source": advisory_source,
+        "exploitation_inferred": exploitation,
+        "dependency_health": {
+            "github_contributors_upper_bound": health.github_contributors_upper_bound,
+            "github_contributors_truncated": health.github_contributors_truncated,
+            "days_since_upstream_push": health.days_since_upstream_push,
+            "osv_ecosystem": health.osv_ecosystem,
+            "osv_prior_vulnerabilities_excluding_current": health.osv_prior_vulnerabilities_excluding_current,
+            "osv_query_skipped_reason": health.osv_query_skipped_reason,
+        },
+        "dedup_matches": [m.model_dump(mode="json") for m in dedup_matches],
+        "oracle": {
+            "vulnerable_ref": default_git_ref,
+            "patched_ref_candidates": list(patched_candidates),
+        },
+    }
+
+
+async def _ssvc_and_conf_with_optional_llm(
+    llm: LLMProvider | None,
+    reasoning_model: str,
+    advisory: AdvisoryData,
+    run_id: uuid.UUID | None,
+    conf: float,
+    cvss_vector: str | None,
+    ssvc: SSVCAction,
+) -> tuple[SSVCAction, float]:
+    if llm is None:
+        return ssvc, conf
+    if not _should_refine_with_llm(conf, advisory, cvss_vector):
+        return ssvc, conf
+    llm_action, llm_conf = await _refine_ssvc_with_llm(
+        llm,
+        reasoning_model,
+        advisory,
+        run_id=run_id,
+    )
+    if llm_action is None or llm_conf is None:
+        return ssvc, conf
+    return llm_action, llm_conf
+
+
 async def run_advisory_triage(
     session: AsyncSession,
     repo: RepoConfig,
@@ -449,7 +553,6 @@ async def run_advisory_triage(
     ghsa_id: str,
     advisory_source: Literal["repository", "global"] = "repository",
     run_id: uuid.UUID | None = None,
-    workflow_run_id: uuid.UUID | None = None,  # noqa: ARG001 — reserved for audit logging
     llm: LLMProvider | None = None,
     reasoning_model: str = "claude-sonnet-4-6",
     tracker_credentials: IssueTrackerCredentials | None = None,
@@ -459,7 +562,7 @@ async def run_advisory_triage(
     repo_slug = f"{repo.github_org}/{repo.github_repo}".lower()
     advisory = await scm.fetch_advisory(
         ghsa,
-        repo=repo_slug if advisory_source == "repository" else None,
+        repo=_fetch_advisory_repo_arg(advisory_source, repo_slug),
         source=advisory_source,
     )
 
@@ -470,26 +573,20 @@ async def run_advisory_triage(
     conf = structured_base_confidence(advisory, cvss_vector, exploitation)
 
     cve_id = _first_cve_id(advisory)
-    exclude_osv: set[str] = {ghsa.upper()}
-    if cve_id:
-        exclude_osv.add(cve_id.upper())
-    exclude_osv.update(x.upper() for x in advisory.cve_ids)
+    exclude_osv = _exclude_osv_ids(ghsa, cve_id, advisory)
 
     health = await collect_dependency_health_signals(scm, http, advisory, exclude_osv)
     conf = apply_dependency_health_to_confidence(conf, health)
 
-    llm_action: SSVCAction | None = None
-    llm_conf: float | None = None
-    if llm is not None and _should_refine_with_llm(conf, advisory, cvss_vector):
-        llm_action, llm_conf = await _refine_ssvc_with_llm(
-            llm,
-            reasoning_model,
-            advisory,
-            run_id=run_id,
-        )
-    if llm_action is not None and llm_conf is not None:
-        ssvc = llm_action
-        conf = llm_conf
+    ssvc, conf = await _ssvc_and_conf_with_optional_llm(
+        llm,
+        reasoning_model,
+        advisory,
+        run_id,
+        conf,
+        cvss_vector,
+        ssvc,
+    )
 
     cwe_for_dedup = _first_cwe_id(advisory)
     adapters = _build_issue_tracker_adapters(repo, scm, session, http, tracker_credentials)
@@ -509,52 +606,26 @@ async def run_advisory_triage(
         now=datetime.now(UTC),
     )
 
-    dup_of: str | None = None
-    dup_tracker: str | None = None
-    dup_url: str | None = None
-    known_status: KnownStatus | None = None
-    primary: TrackerMatch | None = (
-        accepted_risk_hit if accepted_risk_hit is not None else (dedup_matches[0] if dedup_matches else None)
+    dup_of, dup_tracker, dup_url, known_status = _duplicate_fields_from_dedup(
+        accepted_risk_hit,
+        dedup_matches,
     )
-    if primary is not None:
-        dup_of = primary.issue_id
-        dup_tracker = primary.tracker
-        dup_url = primary.issue_url
-        if accepted_risk_hit is not None:
-            known_status = KnownStatus.known_accepted_risk
 
     source_ref = advisory.html_url or f"https://github.com/advisories/{ghsa}"
     title = advisory.summary.strip() or ghsa
     desc_sanitised = sanitize_text(advisory.description, max_chars=32_768)
 
-    patched_candidates: list[str] = []
-    if advisory.first_patched_version:
-        v = advisory.first_patched_version.strip()
-        if v:
-            patched_candidates = [v]
-            if not v.lower().startswith("v"):
-                tagged = f"v{v}"
-                if tagged not in patched_candidates:
-                    patched_candidates.append(tagged)
+    patched_candidates = _patched_ref_candidates(advisory)
 
-    evidence: dict[str, Any] = {
-        "ghsa_id": ghsa,
-        "advisory_source": advisory_source,
-        "exploitation_inferred": exploitation,
-        "dependency_health": {
-            "github_contributors_upper_bound": health.github_contributors_upper_bound,
-            "github_contributors_truncated": health.github_contributors_truncated,
-            "days_since_upstream_push": health.days_since_upstream_push,
-            "osv_ecosystem": health.osv_ecosystem,
-            "osv_prior_vulnerabilities_excluding_current": health.osv_prior_vulnerabilities_excluding_current,
-            "osv_query_skipped_reason": health.osv_query_skipped_reason,
-        },
-        "dedup_matches": [m.model_dump(mode="json") for m in dedup_matches],
-        "oracle": {
-            "vulnerable_ref": repo.default_git_ref,
-            "patched_ref_candidates": patched_candidates,
-        },
-    }
+    evidence = _build_finding_evidence(
+        ghsa,
+        advisory_source,
+        exploitation,
+        health,
+        dedup_matches,
+        repo.default_git_ref,
+        patched_candidates,
+    )
 
     cwe_list = list(advisory.cwe_ids) if advisory.cwe_ids else None
 

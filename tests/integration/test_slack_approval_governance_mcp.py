@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from agents.approval import ApprovalContext, ApprovalOutcome, handle_slack_approval
 from agents.governance import GovernanceTier
-from agents.orchestrator import AdvisoryWorkflowState, run_advisory_workflow
+from agents.orchestrator import AdvisoryWorkflowParams, AdvisoryWorkflowState, run_advisory_workflow
 from config import (
     AppConfig,
     GovernanceApprover,
@@ -224,12 +224,7 @@ class TestSlackApprovalEndToEnd:
             scm = _make_scm(gh)
 
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -308,12 +303,7 @@ class TestSlackApprovalEndToEnd:
             gh = MagicMock(spec=GitHubClient)
             scm = _make_scm(gh)
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-T3ST-R3J1-T3ST",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-T3ST-R3J1-T3ST")
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -368,12 +358,7 @@ class TestSlackApprovalEndToEnd:
             gh = MagicMock(spec=GitHubClient)
             scm = _make_scm(gh)
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         finding = await db_session.get(Finding, run.finding_id)
@@ -418,12 +403,7 @@ class TestSlackApprovalEndToEnd:
             gh = MagicMock(spec=GitHubClient)
             scm = _make_scm(gh)
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         finding = await db_session.get(Finding, run.finding_id)
@@ -488,12 +468,7 @@ class TestGovernanceRoutingEndToEnd:
         http = httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok())
         async with http:
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         assert run.state == AdvisoryWorkflowState.done.value
@@ -535,12 +510,7 @@ class TestGovernanceRoutingEndToEnd:
         http = httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok())
         async with http:
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         assert run.state == AdvisoryWorkflowState.done.value
@@ -566,12 +536,7 @@ class TestGovernanceRoutingEndToEnd:
         mocker.patch("agents.orchestrator.finding_to_report_payload", return_value=MagicMock())
         async with http:
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         assert run.state == AdvisoryWorkflowState.done.value
@@ -595,12 +560,7 @@ class TestGovernanceRoutingEndToEnd:
             gh = MagicMock(spec=GitHubClient)
             scm = _make_scm(gh)
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -619,12 +579,7 @@ class TestGovernanceRoutingEndToEnd:
             gh = MagicMock(spec=GitHubClient)
             scm = _make_scm(gh)
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -645,12 +600,7 @@ class TestGovernanceRoutingEndToEnd:
             gh = MagicMock(spec=GitHubClient)
             scm = _make_scm(gh)
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -673,12 +623,7 @@ class TestGovernanceRoutingEndToEnd:
         http = httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok())
         async with http:
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
         logs = (

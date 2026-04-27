@@ -84,22 +84,44 @@ def _oracle_vulnerable_and_patched_candidates(
     return vulnerable_ref, candidates
 
 
-async def run_patch_oracle_job(
-    session: AsyncSession,
-    scm: SCMProvider,
-    *,
-    repo_slug: str,
-    finding_id: uuid.UUID,
-    workflow_run_id: uuid.UUID,
-    container_socket: str,
-    default_git_ref: str = "main",
-) -> tuple[FindingStatus, str]:
-    """Execute patch oracle; persist upgraded tier and merged evidence. Returns (tier, summary)."""
+def _poc_command_and_type(finding: Finding) -> tuple[list[str], PocType]:
+    poc_raw = finding.reproduction or ""
+    poc_command = ["python", "-c", poc_raw] if poc_raw else ["echo", "no PoC"]
+    poc_type = PocType.RESEARCHER_SUBMITTED
+    ev = finding.evidence or {}
+    ex = ev.get("execution")
+    if not isinstance(ex, dict):
+        return poc_command, poc_type
+    pt = ex.get("poc_type")
+    if pt == PocType.NUCLEI_TEMPLATE.value:
+        poc_type = PocType.NUCLEI_TEMPLATE
+    elif pt == PocType.LLM_GENERATED.value:
+        poc_type = PocType.LLM_GENERATED
+    return poc_command, poc_type
+
+
+def _assert_eligible_for_patch_oracle(finding: Finding) -> None:
+    if finding.status != FindingStatus.confirmed_low:
+        msg = f"patch oracle requires confirmed_low status, got {finding.status.value}"
+        raise RuntimeError(msg)
+    if not finding.patch_available:
+        msg = "patch oracle requires patch_available"
+        raise RuntimeError(msg)
+
+
+async def _load_finding_for_oracle(session: AsyncSession, finding_id: uuid.UUID) -> Finding:
     finding = await session.get(Finding, finding_id)
     if finding is None:
         msg = "finding not found for patch oracle"
         raise RuntimeError(msg)
+    return finding
 
+
+async def _assert_workflow_run_matches_finding(
+    session: AsyncSession,
+    workflow_run_id: uuid.UUID,
+    finding_id: uuid.UUID,
+) -> None:
     run = await session.get(WorkflowRun, workflow_run_id)
     if run is None:
         msg = "workflow run not found for patch oracle"
@@ -108,42 +130,18 @@ async def run_patch_oracle_job(
         msg = "workflow run does not match finding for patch oracle"
         raise RuntimeError(msg)
 
-    refs = _oracle_vulnerable_and_patched_candidates(finding, default_git_ref=default_git_ref)
-    if refs is None:
-        msg = "patch oracle metadata missing (patched ref candidates)"
-        raise RuntimeError(msg)
-    vulnerable_ref, patched_candidates = refs
 
-    if finding.status != FindingStatus.confirmed_low:
-        msg = f"patch oracle requires confirmed_low status, got {finding.status.value}"
-        raise RuntimeError(msg)
-    if not finding.patch_available:
-        msg = "patch oracle requires patch_available"
-        raise RuntimeError(msg)
-
-    poc_raw = finding.reproduction or ""
-    poc_command = ["python", "-c", poc_raw] if poc_raw else ["echo", "no PoC"]
-    poc_type = PocType.RESEARCHER_SUBMITTED
-    ev = finding.evidence or {}
-    ex = ev.get("execution")
-    if isinstance(ex, dict):
-        pt = ex.get("poc_type")
-        if pt == PocType.NUCLEI_TEMPLATE.value:
-            poc_type = PocType.NUCLEI_TEMPLATE
-        elif pt == PocType.LLM_GENERATED.value:
-            poc_type = PocType.LLM_GENERATED
-
-    log = _LOG.bind(
-        agent="patch_oracle",
-        finding_id=str(finding_id),
-        workflow_run_id=str(workflow_run_id),
-    )
-    log.info(
-        "patch_oracle_start",
-        vulnerable_ref=vulnerable_ref,
-        patched_candidates=patched_candidates,
-    )
-
+async def _run_vulnerable_and_patched_executions(
+    scm: SCMProvider,
+    *,
+    repo_slug: str,
+    vulnerable_ref: str,
+    patched_candidates: list[str],
+    poc_command: list[str],
+    poc_type: PocType,
+    container_socket: str,
+    log: structlog.stdlib.BoundLogger,
+) -> tuple[ExecutionResult, str, ExecutionResult]:
     work_root = Path(tempfile.mkdtemp(prefix="scout-oracle-"))
     try:
         vuln_dir = work_root / "vuln"
@@ -208,6 +206,53 @@ async def run_patch_oracle_job(
 
     assert pat_exec is not None
     assert patched_ref is not None
+    return vuln_exec, patched_ref, pat_exec
+
+
+async def run_patch_oracle_job(
+    session: AsyncSession,
+    scm: SCMProvider,
+    *,
+    repo_slug: str,
+    finding_id: uuid.UUID,
+    workflow_run_id: uuid.UUID,
+    container_socket: str,
+    default_git_ref: str = "main",
+) -> tuple[FindingStatus, str]:
+    """Execute patch oracle; persist upgraded tier and merged evidence. Returns (tier, summary)."""
+    finding = await _load_finding_for_oracle(session, finding_id)
+    await _assert_workflow_run_matches_finding(session, workflow_run_id, finding_id)
+
+    refs = _oracle_vulnerable_and_patched_candidates(finding, default_git_ref=default_git_ref)
+    if refs is None:
+        msg = "patch oracle metadata missing (patched ref candidates)"
+        raise RuntimeError(msg)
+    vulnerable_ref, patched_candidates = refs
+
+    _assert_eligible_for_patch_oracle(finding)
+    poc_command, poc_type = _poc_command_and_type(finding)
+
+    log = _LOG.bind(
+        agent="patch_oracle",
+        finding_id=str(finding_id),
+        workflow_run_id=str(workflow_run_id),
+    )
+    log.info(
+        "patch_oracle_start",
+        vulnerable_ref=vulnerable_ref,
+        patched_candidates=patched_candidates,
+    )
+
+    vuln_exec, patched_ref, pat_exec = await _run_vulnerable_and_patched_executions(
+        scm,
+        repo_slug=repo_slug,
+        vulnerable_ref=vulnerable_ref,
+        patched_candidates=patched_candidates,
+        poc_command=poc_command,
+        poc_type=poc_type,
+        container_socket=container_socket,
+        log=log,
+    )
 
     vuln_hit = vuln_exec.exit_code == 0 and output_matches_success_patterns(
         vuln_exec.raw_stdout,

@@ -7,7 +7,12 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from agents.orchestrator import AdvisoryWorkflowState, ScheduleRetryParams, run_advisory_workflow
+from agents.orchestrator import (
+    AdvisoryWorkflowParams,
+    AdvisoryWorkflowState,
+    ScheduleRetryParams,
+    run_advisory_workflow,
+)
 from config import GovernanceConfig, GovernanceRule, RepoConfig
 from models import AgentActionLog, Finding, FindingStatus, KnownStatus, Severity, SSVCAction, WorkflowKind
 from tools.circuit_breaker import ExternalApiCircuitBreaker
@@ -82,12 +87,7 @@ async def test_workflow_happy_path_completes(db_session, mocker) -> None:
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.done.value
@@ -114,8 +114,7 @@ async def test_github_transient_schedules_retry(db_session, mocker) -> None:
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", schedule_retry=schedule),
         )
 
     assert run.retry_count == 1
@@ -142,12 +141,7 @@ async def test_github_permanent_error_triage_terminal(db_session, mocker) -> Non
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.error_triage.value
@@ -187,9 +181,7 @@ async def test_circuit_github_blocks_before_triage(db_session, mocker) -> None:
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            circuit_breaker=breaker,
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", circuit_breaker=breaker, schedule_retry=schedule),
         )
 
     triage.assert_not_called()
@@ -239,8 +231,7 @@ async def test_slack_transient_schedules_retry(db_session, mocker) -> None:
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", schedule_retry=schedule),
         )
 
     assert run.state == AdvisoryWorkflowState.reporting.value
@@ -277,12 +268,7 @@ async def test_advisory_to_slack_seconds_metric_emitted(db_session, mocker) -> N
         with patch("agents.orchestrator._LOG") as mock_log:
             mock_log.bind.return_value = mock_log
             run = await run_advisory_workflow(
-                db_session,
-                repo,
-                scm,
-                http,
-                slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
             )
 
     assert run.state == AdvisoryWorkflowState.done.value
@@ -335,12 +321,7 @@ async def test_auto_resolve_tier_skips_slack_and_finishes(db_session, mocker) ->
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.done.value
@@ -387,12 +368,7 @@ async def test_notify_tier_posts_slack_and_finishes(db_session, mocker) -> None:
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.done.value
@@ -437,12 +413,7 @@ async def test_approve_tier_parks_in_awaiting_approval(db_session, mocker) -> No
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.awaiting_approval.value
@@ -495,12 +466,7 @@ async def test_default_governance_parks_high_severity_in_awaiting_approval(db_se
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            repo_no_gov,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo_no_gov, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.awaiting_approval.value

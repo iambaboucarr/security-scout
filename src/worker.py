@@ -12,7 +12,7 @@ import structlog
 from arq.connections import RedisSettings
 from arq.typing import StartupShutdown, WorkerSettingsBase
 
-from agents.orchestrator import ScheduleRetryParams, run_advisory_workflow
+from agents.orchestrator import AdvisoryWorkflowParams, ScheduleRetryParams, run_advisory_workflow
 from agents.patch_oracle import run_patch_oracle_job
 from ai.anthropic_provider import create_provider
 from ai.provider import LLMProvider
@@ -161,16 +161,18 @@ async def process_advisory_workflow_job(
             scm,
             http,
             slack,
-            ghsa_id=ghsa_id,
-            advisory_source=src,
-            run_id=uuid.uuid4(),
-            llm=llm,
-            reasoning_model=settings.reasoning_model,
-            schedule_retry=schedule_retry,
-            resume_workflow_run_id=resume_uuid,
-            rate_limiter=rate_limiter,
-            tracker_credentials=tracker_credentials,
-            container_socket=settings.container_socket,
+            AdvisoryWorkflowParams(
+                ghsa_id=ghsa_id,
+                advisory_source=src,
+                run_id=uuid.uuid4(),
+                llm=llm,
+                reasoning_model=settings.reasoning_model,
+                schedule_retry=schedule_retry,
+                resume_workflow_run_id=resume_uuid,
+                rate_limiter=rate_limiter,
+                tracker_credentials=tracker_credentials,
+                container_socket=settings.container_socket,
+            ),
         )
 
 

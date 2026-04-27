@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from agents.orchestrator import (
     _RATE_LIMIT_RETRY_SECONDS,
+    AdvisoryWorkflowParams,
     AdvisoryWorkflowState,
     ScheduleRetryParams,
     run_advisory_workflow,
@@ -97,9 +98,7 @@ async def test_rate_limiter_circuit_open_defers_with_schedule_retry(db_session, 
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            rate_limiter=rl,
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", rate_limiter=rl, schedule_retry=schedule),
         )
 
     schedule.assert_awaited_once()
@@ -138,9 +137,7 @@ async def test_rate_limiter_circuit_open_no_schedule_retry_raises(db_session, mo
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
-                rate_limiter=rl,
-                schedule_retry=None,
+                AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", rate_limiter=rl, schedule_retry=None),
             )
 
 
@@ -177,9 +174,7 @@ async def test_rate_limit_exceeded_schedules_retry(db_session, mocker) -> None:
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            rate_limiter=rl,
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", rate_limiter=rl, schedule_retry=schedule),
         )
 
     schedule.assert_awaited_once()
@@ -229,9 +224,7 @@ async def test_rate_limit_exceeded_no_retry_goes_to_error_reporting(db_session, 
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            rate_limiter=rl,
-            schedule_retry=None,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", rate_limiter=rl, schedule_retry=None),
         )
 
     assert run.state == AdvisoryWorkflowState.error_reporting.value
@@ -273,9 +266,7 @@ async def test_rate_limiter_skipped_when_resuming_at_reporting(db_session, mocke
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            resume_workflow_run_id=wr.id,
-            rate_limiter=rl,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=wr.id, rate_limiter=rl),
         )
 
     rl.check_and_increment.assert_not_called()
@@ -306,8 +297,7 @@ async def test_rate_limiter_allows_and_workflow_completes(db_session, mocker) ->
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            rate_limiter=rl,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", rate_limiter=rl),
         )
 
     rl.check_and_increment.assert_awaited_once()

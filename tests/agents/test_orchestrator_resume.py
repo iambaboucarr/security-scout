@@ -7,7 +7,12 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from agents.orchestrator import AdvisoryWorkflowState, ScheduleRetryParams, run_advisory_workflow
+from agents.orchestrator import (
+    AdvisoryWorkflowParams,
+    AdvisoryWorkflowState,
+    ScheduleRetryParams,
+    run_advisory_workflow,
+)
 from config import GovernanceConfig, GovernanceRule, RepoConfig
 from models import Finding, FindingStatus, Severity, SSVCAction, WorkflowKind, WorkflowRun
 from tools.github import GitHubAPIError, GitHubClient
@@ -92,8 +97,7 @@ async def test_resume_reporting_skips_triage(db_session, mocker) -> None:
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            resume_workflow_run_id=run_id,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=run_id),
         )
 
     assert out.state == AdvisoryWorkflowState.done.value
@@ -120,8 +124,7 @@ async def test_resume_triaging_github_transient_no_second_workflow_run(db_sessio
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", schedule_retry=schedule),
         )
 
     assert out.state == AdvisoryWorkflowState.triaging.value
@@ -144,9 +147,9 @@ async def test_resume_triaging_github_transient_no_second_workflow_run(db_sessio
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            resume_workflow_run_id=out.id,
-            schedule_retry=schedule2,
+            AdvisoryWorkflowParams(
+                ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=out.id, schedule_retry=schedule2
+            ),
         )
 
     assert out2.retry_count == 2

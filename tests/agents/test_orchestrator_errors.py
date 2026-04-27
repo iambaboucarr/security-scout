@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from agents.orchestrator import (
+    AdvisoryWorkflowParams,
     AdvisoryWorkflowState,
     ScheduleRetryParams,
     _best_effort_error_slack,
@@ -120,8 +121,7 @@ async def test_resume_completed_workflow_raises(db_session, mocker) -> None:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
-                resume_workflow_run_id=wr.id,
+                AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=wr.id),
             )
 
 
@@ -146,8 +146,7 @@ async def test_resume_wrong_workflow_type_raises(db_session) -> None:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
-                resume_workflow_run_id=wr.id,
+                AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=wr.id),
             )
 
 
@@ -172,8 +171,7 @@ async def test_resume_invalid_state_raises(db_session) -> None:
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
-                resume_workflow_run_id=wr.id,
+                AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=wr.id),
             )
 
 
@@ -199,8 +197,7 @@ async def test_resume_triage_complete_with_no_finding_raises(db_session) -> None
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
-                resume_workflow_run_id=wr.id,
+                AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=wr.id),
             )
 
 
@@ -225,8 +222,7 @@ async def test_security_scout_error_transient_schedules_retry(db_session, mocker
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", schedule_retry=schedule),
         )
 
     assert run.retry_count == 1
@@ -250,12 +246,7 @@ async def test_security_scout_error_permanent_terminal(db_session, mocker) -> No
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            _repo(),
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, _repo(), scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.error_triage.value
@@ -280,12 +271,7 @@ async def test_unrecoverable_exception_during_triage(db_session, mocker) -> None
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            _repo(),
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, _repo(), scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.error_unrecoverable.value
@@ -322,12 +308,7 @@ async def test_slack_permanent_error_terminal(db_session, mocker) -> None:
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            _repo(),
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, _repo(), scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.error_reporting.value
@@ -354,12 +335,7 @@ async def test_slack_malformed_response_terminal(db_session, mocker) -> None:
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            _repo(),
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, _repo(), scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.error_reporting.value
@@ -384,12 +360,7 @@ async def test_unrecoverable_exception_during_reporting(db_session, mocker) -> N
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         run = await run_advisory_workflow(
-            db_session,
-            _repo(),
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, _repo(), scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.error_unrecoverable.value
@@ -434,10 +405,12 @@ async def test_slack_circuit_blocks_before_reporting(db_session, mocker) -> None
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            resume_workflow_run_id=wr.id,
-            circuit_breaker=breaker,
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
+                resume_workflow_run_id=wr.id,
+                circuit_breaker=breaker,
+                schedule_retry=schedule,
+            ),
         )
 
     schedule.assert_awaited_once()
@@ -473,10 +446,12 @@ async def test_slack_circuit_blocks_no_schedule_retry_raises(db_session) -> None
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
-                resume_workflow_run_id=wr.id,
-                circuit_breaker=breaker,
-                schedule_retry=None,
+                AdvisoryWorkflowParams(
+                    ghsa_id="GHSA-TEST-ABCD-EFGH",
+                    resume_workflow_run_id=wr.id,
+                    circuit_breaker=breaker,
+                    schedule_retry=None,
+                ),
             )
 
 
@@ -502,9 +477,7 @@ async def test_github_circuit_blocks_no_schedule_retry_raises(db_session, mocker
                 scm,
                 http,
                 slack,
-                ghsa_id="GHSA-TEST-ABCD-EFGH",
-                circuit_breaker=breaker,
-                schedule_retry=None,
+                AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", circuit_breaker=breaker, schedule_retry=None),
             )
 
 
@@ -534,8 +507,7 @@ async def test_github_transient_opens_circuit_breaker(db_session, mocker) -> Non
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            circuit_breaker=breaker,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", circuit_breaker=breaker),
         )
 
     assert run.state == AdvisoryWorkflowState.error_triage.value
@@ -578,8 +550,7 @@ async def test_slack_transient_opens_circuit_breaker(db_session, mocker) -> None
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            circuit_breaker=breaker,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", circuit_breaker=breaker),
         )
 
     assert run.state == AdvisoryWorkflowState.error_reporting.value
@@ -626,12 +597,7 @@ async def test_slack_notify_on_triage_failure_excludes_exception_message(db_sess
         gh = MagicMock(spec=GitHubClient)
         scm = _make_scm(gh)
         await run_advisory_workflow(
-            db_session,
-            _repo(),
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, _repo(), scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     slack.notify_workflow_error.assert_awaited_once()
@@ -687,8 +653,7 @@ async def test_circuit_breaker_resume_logged_on_workflow_start(db_session, mocke
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            circuit_breaker=breaker,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", circuit_breaker=breaker),
         )
 
     assert run.state == AdvisoryWorkflowState.done.value

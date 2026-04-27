@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from agents.env_builder import DetectedStack, EnvBuildResult
-from agents.orchestrator import AdvisoryWorkflowState, run_advisory_workflow
+from agents.orchestrator import AdvisoryWorkflowParams, AdvisoryWorkflowState, run_advisory_workflow
 from agents.sandbox_executor import ExecutionResult, PocType
 from config import GovernanceConfig, GovernanceRule, RepoConfig
 from models import AgentActionLog, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
@@ -118,13 +118,7 @@ async def test_preflight_clean_continues_to_done(db_session, mocker, tmp_path) -
         slack = SlackClient("xoxb-test", client=http)
         scm = _make_scm(MagicMock(spec=GitHubClient))
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            work_dir=tmp_path,
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", work_dir=tmp_path)
         )
 
     assert run.state == AdvisoryWorkflowState.done.value
@@ -161,12 +155,7 @@ async def test_no_poc_skips_preflight(db_session, mocker) -> None:
         slack = SlackClient("xoxb-test", client=http)
         scm = _make_scm(MagicMock(spec=GitHubClient))
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.done.value
@@ -204,12 +193,7 @@ async def test_preflight_suspicious_parks_workflow(db_session, mocker) -> None:
         slack = SlackClient("xoxb-test", client=http)
         scm = _make_scm(MagicMock(spec=GitHubClient))
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.awaiting_preflight_decision.value
@@ -239,12 +223,7 @@ async def test_preflight_malicious_blocks_workflow(db_session, mocker) -> None:
         slack = SlackClient("xoxb-test", client=http)
         scm = _make_scm(MagicMock(spec=GitHubClient))
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.pre_flight_blocked.value
@@ -285,12 +264,7 @@ async def test_preflight_error_fails_closed_to_suspicious(db_session, mocker) ->
         slack = SlackClient("xoxb-test", client=http)
         scm = _make_scm(MagicMock(spec=GitHubClient))
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.pre_flight_suspicious.value
@@ -316,12 +290,7 @@ async def test_empty_reproduction_skips_preflight(db_session, mocker) -> None:
         slack = SlackClient("xoxb-test", client=http)
         scm = _make_scm(MagicMock(spec=GitHubClient))
         run = await run_advisory_workflow(
-            db_session,
-            repo,
-            scm,
-            http,
-            slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
+            db_session, repo, scm, http, slack, AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH")
         )
 
     assert run.state == AdvisoryWorkflowState.done.value

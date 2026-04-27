@@ -23,7 +23,7 @@ import structlog
 from models import FindingStatus
 from tools.docker_sandbox import SandboxConfig, SandboxError, run_container
 from tools.input_sanitiser import sanitize_text
-from tools.nuclei import NucleiError, run_nuclei
+from tools.nuclei import NUCLEI_WALL_CLOCK_SECONDS, NucleiError, run_nuclei
 
 _LOG = structlog.get_logger(__name__)
 
@@ -240,7 +240,6 @@ async def execute_nuclei(
     target: str,
     cve_id: str | None = None,
     template_paths: list[Path] | None = None,
-    timeout: int = 120,
 ) -> ExecutionResult:
     """Run Nuclei templates against a target and return structured results."""
     log = _LOG.bind(agent="sandbox_executor", poc_type=PocType.NUCLEI_TEMPLATE.value)
@@ -249,11 +248,23 @@ async def execute_nuclei(
     template_ids = [cve_id] if cve_id else None
 
     try:
-        result = await run_nuclei(
-            target=target,
-            template_ids=template_ids,
-            template_paths=template_paths,
-            timeout=timeout,
+        async with asyncio.timeout(NUCLEI_WALL_CLOCK_SECONDS):
+            result = await run_nuclei(
+                target=target,
+                template_ids=template_ids,
+                template_paths=template_paths,
+            )
+    except TimeoutError:
+        log.warning("nuclei_execution_timeout", wall_clock_seconds=NUCLEI_WALL_CLOCK_SECONDS)
+        return ExecutionResult(
+            confidence_tier=FindingStatus.error,
+            evidence_excerpt="Nuclei scan timed out",
+            raw_stdout="",
+            raw_stderr="",
+            elapsed_seconds=float(NUCLEI_WALL_CLOCK_SECONDS),
+            poc_type=PocType.NUCLEI_TEMPLATE,
+            exit_code=-1,
+            timed_out=True,
         )
     except NucleiError as exc:
         log.warning("nuclei_execution_error", err=str(exc))

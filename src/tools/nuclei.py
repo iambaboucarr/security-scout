@@ -11,6 +11,7 @@ or Docker lifecycle APIs.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +22,8 @@ from tools.input_sanitiser import sanitize_text
 
 _LOG = structlog.get_logger(__name__)
 
-_NUCLEI_TIMEOUT_SECONDS = 120
+NUCLEI_WALL_CLOCK_SECONDS = 120
+_TEMPLATE_LIST_WALL_CLOCK_SECONDS = 30
 _MAX_OUTPUT_BYTES = 50 * 1024
 
 
@@ -117,10 +119,17 @@ async def check_template_exists(cve_id: str) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        try:
+            async with asyncio.timeout(_TEMPLATE_LIST_WALL_CLOCK_SECONDS):
+                stdout, _ = await proc.communicate()
+        except TimeoutError:
+            proc.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            return False
         template_list = stdout.decode("utf-8", errors="replace")
         return cve_id.upper() in template_list.upper()
-    except FileNotFoundError, TimeoutError, OSError:
+    except OSError:
         return False
 
 
@@ -129,7 +138,6 @@ async def run_nuclei(
     target: str,
     template_ids: list[str] | None = None,
     template_paths: list[Path] | None = None,
-    timeout: int = _NUCLEI_TIMEOUT_SECONDS,
     extra_args: list[str] | None = None,
 ) -> NucleiResult:
     """Run Nuclei against *target* with specified templates.
@@ -145,7 +153,7 @@ async def run_nuclei(
         "-rate-limit",
         "10",
         "-timeout",
-        str(min(timeout, 30)),
+        str(min(NUCLEI_WALL_CLOCK_SECONDS, 30)),
         "-silent",
     ]
 
@@ -172,23 +180,20 @@ async def run_nuclei(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=timeout,
-        )
-        elapsed = time.monotonic() - start
-        timed_out = False
-        exit_code = proc.returncode or 0
-    except TimeoutError:
-        elapsed = time.monotonic() - start
-        proc.kill()
-        await proc.wait()
-        stdout_bytes = b""
-        stderr_bytes = b""
-        timed_out = True
-        exit_code = -1
     except FileNotFoundError as exc:
         raise NucleiError("nuclei binary not found on PATH") from exc
+
+    try:
+        stdout_bytes, stderr_bytes = await proc.communicate()
+    except asyncio.CancelledError:
+        proc.kill()
+        with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        raise
+
+    elapsed = time.monotonic() - start
+    timed_out = False
+    exit_code = proc.returncode or 0
 
     stdout_raw = _truncate(stdout_bytes.decode("utf-8", errors="replace"))
     stderr_raw = _truncate(stderr_bytes.decode("utf-8", errors="replace"))
@@ -215,6 +220,7 @@ async def run_nuclei(
 
 
 __all__ = [
+    "NUCLEI_WALL_CLOCK_SECONDS",
     "NucleiError",
     "NucleiMatch",
     "NucleiResult",
