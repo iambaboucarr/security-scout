@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, Literal, Self, cast
 from urllib.parse import parse_qs, urlparse
@@ -488,7 +489,7 @@ class GitHubClient:
             workflow_run_id=workflow_run_id,
         )
 
-    async def list_repository_security_advisories(
+    async def iter_repository_security_advisories(
         self,
         owner: str,
         repo: str,
@@ -498,14 +499,18 @@ class GitHubClient:
         sort: str = "updated",
         direction: str = "desc",
         per_page: int = 30,
+        max_pages: int = 20,
         finding_id: str | None = None,
         workflow_run_id: uuid.UUID | str | None = None,
-    ) -> tuple[AdvisoryData, ...]:
-        """List all security advisories for a repository (cursor-paginated)."""
+    ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
+        """Yield one page of repository security advisories (cursor-paginated)."""
         o = validate_github_repo_owner(owner)
         r = validate_github_repo_name(repo)
         if per_page < 1 or per_page > 100:
             msg = "per_page must be between 1 and 100"
+            raise ValueError(msg)
+        if max_pages < 1:
+            msg = "max_pages must be >= 1"
             raise ValueError(msg)
         path = f"/repos/{o}/{r}/security-advisories"
         params: dict[str, str | int] = {
@@ -517,9 +522,6 @@ class GitHubClient:
             params["state"] = state
         if severity is not None:
             params["severity"] = severity
-
-        collected: list[AdvisoryData] = []
-        max_pages = 20
 
         for _ in range(max_pages):
             response = await self._request(
@@ -534,10 +536,11 @@ class GitHubClient:
                 finding_id=finding_id,
                 workflow_run_id=workflow_run_id,
             )
+            page: list[AdvisoryData] = []
             for item in batch:
                 if not isinstance(item, dict):
                     continue
-                collected.append(
+                page.append(
                     _advisory_from_payload(
                         item,
                         source="repository",
@@ -545,6 +548,7 @@ class GitHubClient:
                         workflow_run_id=workflow_run_id,
                     )
                 )
+            yield tuple(page)
             if len(batch) < per_page:
                 break
             cursor = _next_cursor_from_link_header(response)
@@ -553,6 +557,35 @@ class GitHubClient:
             params["after"] = cursor
             params.pop("before", None)
 
+    async def list_repository_security_advisories(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str | None = None,
+        severity: str | None = None,
+        sort: str = "updated",
+        direction: str = "desc",
+        per_page: int = 30,
+        max_pages: int = 20,
+        finding_id: str | None = None,
+        workflow_run_id: uuid.UUID | str | None = None,
+    ) -> tuple[AdvisoryData, ...]:
+        """List all security advisories for a repository (cursor-paginated)."""
+        collected: list[AdvisoryData] = []
+        async for page in self.iter_repository_security_advisories(
+            owner,
+            repo,
+            state=state,
+            severity=severity,
+            sort=sort,
+            direction=direction,
+            per_page=per_page,
+            max_pages=max_pages,
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        ):
+            collected.extend(page)
         return tuple(collected)
 
     async def fetch_pull_request(
