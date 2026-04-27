@@ -14,8 +14,15 @@ repos:
     issue_trackers: []
     dedup_semantic_search: false
     accepted_risk_ttl_days: 90
-    # REST poll for repo advisories (e.g. triage state). Default: [triage]. Use [] to disable for this repo.
-    # advisory_poll_states: []
+    # Optional REST poll for repository security advisories (complements webhooks; worker must run with polling enabled).
+    # Default advisory_poll_states: [triage] — set [] to disable this repo. Valid states exclude "closed". "published" is allowed but redundant with webhooks (warning metric).
+    # advisory_poll_states:
+    #   - triage
+    #   - draft
+    # advisory_poll_max_enqueues_per_tick: 25   # default: cap new enqueues per poll tick for this repo
+    # advisory_poll_max_pages: 5                # default: max GitHub list pages per state per tick
+    # advisory_poll_per_page: 100               # default: items per page (max 100)
+    # advisory_poll_seed_without_enqueue: false # default: set true to advance watermarks/ETag without enqueuing backlog
     # Tiered governance. Omit to keep strict approval for every
     # finding above informational. Precedence: approve > notify > auto_resolve.
     # governance:
