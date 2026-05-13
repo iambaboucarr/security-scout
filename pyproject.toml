@@ -26,8 +26,12 @@ dependencies = [
     "docker>=7.1",
     "structlog>=24.4",
     "pyyaml>=6.0",
+    "click>=8.1",
     "fastmcp>=3.2.4",
 ]
+
+[project.scripts]
+scout = "cli:scout"
 
 [dependency-groups]
 dev = [
@@ -66,6 +70,8 @@ packages = ["src/agents", "src/tools", "src/webhooks", "src/config", "src/ai"]
 "src/main.py" = "main.py"
 "src/worker.py" = "worker.py"
 "src/mcp_readonly.py" = "mcp_readonly.py"
+"src/admin.py" = "admin.py"
+"src/cli.py" = "cli.py"
 
 # ── uv ───────────────────────────────────────────────────────────────────────
 

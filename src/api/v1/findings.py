@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator
 from typing import Annotated, NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,6 +33,7 @@ from api.rate_limit import require_token_rate_limit
 from config import AppConfig
 from models import ApiToken, ApiTokenScope
 from tools import queries
+from tools.queries import FINDINGS_LIST_DEFAULT_LIMIT, FINDINGS_LIST_MAX_LIMIT
 
 _REVIEW_REJECTION_STATUS: dict[ReviewRejectionReason, int] = {
     ReviewRejectionReason.finding_not_found: http_status.HTTP_404_NOT_FOUND,
@@ -101,7 +102,14 @@ def create_findings_router() -> APIRouter:
         repo: str,
         severity: str | None = None,
         finding_status: str | None = None,
-        limit: int = 50,
+        limit: Annotated[
+            int,
+            Query(
+                ge=1,
+                le=FINDINGS_LIST_MAX_LIMIT,
+                description=f"Max rows to return (1-{FINDINGS_LIST_MAX_LIMIT}).",
+            ),
+        ] = FINDINGS_LIST_DEFAULT_LIMIT,
     ) -> list[queries.FindingSummary]:
         try:
             return await queries.query_findings(

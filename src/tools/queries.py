@@ -175,8 +175,8 @@ def _validate_status(status: str) -> FindingStatus:
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_LIMIT = 50
-_MAX_LIMIT = 200
+FINDINGS_LIST_DEFAULT_LIMIT = 50
+FINDINGS_LIST_MAX_LIMIT = 200
 _ECHO_PACKAGE_MAX = 500
 _ECHO_VERSION_MAX = 200
 _ECHO_ECOSYSTEM_MAX = 64
@@ -188,14 +188,16 @@ async def query_findings(
     repo: str,
     severity: str | None = None,
     status: str | None = None,
-    limit: int = _DEFAULT_LIMIT,
+    limit: int = FINDINGS_LIST_DEFAULT_LIMIT,
 ) -> list[FindingSummary]:
     """List findings for *repo*, filtered by severity / status.
 
     *repo* matches ``Finding.repo_name`` case-insensitively (stored
-    canonical lowercase). *limit* is clamped to ``[1, 200]``.
+    canonical lowercase). *limit* is clamped to
+    ``[1, FINDINGS_LIST_MAX_LIMIT]`` (defence in depth if callers omit
+    HTTP validation).
     """
-    clamped_limit = max(1, min(limit, _MAX_LIMIT))
+    clamped_limit = max(1, min(limit, FINDINGS_LIST_MAX_LIMIT))
 
     severity_enum = _validate_severity(severity) if severity is not None else None
     status_enum = _validate_status(status) if status is not None else None
@@ -372,6 +374,8 @@ async def get_triage_status(
 
 
 __all__ = [
+    "FINDINGS_LIST_DEFAULT_LIMIT",
+    "FINDINGS_LIST_MAX_LIMIT",
     "DependencyAdvisory",
     "DependencyRisk",
     "FindingDetail",
