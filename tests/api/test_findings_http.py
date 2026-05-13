@@ -12,8 +12,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from api.findings import create_findings_router
 from api.tokens import create_token, hash_token
+from api.v1 import create_v1_router
 from db import create_engine, create_session_factory, session_scope
 from models import ApiToken, ApiTokenScope, Base, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
 
@@ -34,7 +34,7 @@ async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[As
 def _build_findings_app(factory: async_sessionmaker[AsyncSession]) -> FastAPI:
     app = FastAPI()
     app.state.session_factory = factory
-    app.include_router(create_findings_router())
+    app.include_router(create_v1_router())
     return app
 
 
@@ -151,7 +151,7 @@ async def test_triage_and_dependency_smoke(
     assert r1.json()["found"] is True
 
     r2 = await findings_client.get(
-        "/api/v1/dependencies/check",
+        "/api/v1/check",
         params={"package": "acme", "version": "1", "ecosystem": "npm"},
         headers=headers,
     )
