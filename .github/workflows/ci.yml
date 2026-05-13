@@ -78,7 +78,7 @@ jobs:
           DATABASE_URL: "sqlite+aiosqlite:///./test.db"
           REDIS_URL: "redis://localhost:6379"
       - name: Tests (PostgreSQL marker suite)
-        run: uv run pytest --cov=src --cov-append --cov-report=term-missing -x -n auto --dist loadgroup -m postgres
+        run: uv run pytest --cov=src --cov-append --cov-report=term-missing -x -m postgres
         env:
           DATABASE_URL: "sqlite+aiosqlite:///./test.db"
           REDIS_URL: "redis://localhost:6379"

@@ -174,7 +174,7 @@ addopts = "-x --strict-markers"
 # ── Codespell ─────────────────────────────────────────────────────────────────
 
 [tool.codespell]
-ignore-words-list = "requets"
+ignore-words-list = "requets,abd"
 
 # ── Coverage ──────────────────────────────────────────────────────────────────
 
