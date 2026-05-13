@@ -14,6 +14,7 @@ from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from api.findings import create_findings_router
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, log_and_persist_config_loaded, session_scope
 from models import Base
@@ -224,6 +225,7 @@ def create_app() -> FastAPI:
 
     app.include_router(create_github_webhook_router())
     app.include_router(create_slack_webhook_router())
+    app.include_router(create_findings_router())
     return app
 
 

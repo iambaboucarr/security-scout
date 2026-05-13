@@ -6,11 +6,14 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from config import AppConfig, Settings, configure_logging, load_repos_manifest
 from db import log_and_persist_config_loaded, persist_config_loaded_audit
 from models import (
     AgentActionLog,
+    ApiToken,
+    ApiTokenScope,
     Finding,
     FindingStatus,
     Severity,
@@ -115,6 +118,51 @@ async def test_persist_config_loaded_audit_stores_checksum(db_session, tmp_path:
     assert rows[0].tool_inputs is not None
     assert rows[0].tool_inputs["repos_yaml_sha256"] == "a" * 64
     assert rows[0].workflow_run_id is None
+
+
+async def test_api_token_round_trip(db_session) -> None:
+    token = ApiToken(
+        name="ci",
+        token_hash="a" * 64,
+        scopes=[ApiTokenScope.findings_read.value],
+        owner_slack_id="U_OPS",
+    )
+    db_session.add(token)
+    await db_session.commit()
+
+    result = await db_session.execute(select(ApiToken))
+    row = result.scalar_one()
+    assert row.name == "ci"
+    assert row.token_hash == "a" * 64
+    assert row.scopes == ["findings:read"]
+    assert row.owner_slack_id == "U_OPS"
+    assert row.created_at is not None
+    assert row.last_used_at is None
+    assert row.revoked_at is None
+
+
+async def test_api_token_hash_is_unique(db_session) -> None:
+    db_session.add(
+        ApiToken(
+            name="a",
+            token_hash="b" * 64,
+            scopes=["findings:read"],
+            owner_slack_id="U1",
+        )
+    )
+    await db_session.commit()
+
+    db_session.add(
+        ApiToken(
+            name="b",
+            token_hash="b" * 64,
+            scopes=["findings:read"],
+            owner_slack_id="U2",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
 
 
 async def test_log_and_persist_config_loaded_writes_log_and_row(

@@ -211,3 +211,25 @@ class AgentActionLog(Base):
     )
 
     workflow_run: Mapped[WorkflowRun | None] = relationship(back_populates="action_logs")
+
+
+class ApiTokenScope(StrEnum):
+    findings_read = "findings:read"
+    findings_write = "findings:write"
+
+
+class ApiToken(Base):
+    __tablename__ = "api_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    owner_slack_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
