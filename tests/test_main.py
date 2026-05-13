@@ -7,6 +7,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
+from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 
 from main import _MAX_BODY_BYTES, ContentSizeLimitMiddleware, _run_readiness_checks
@@ -43,6 +45,25 @@ async def test_content_size_limit_rejects_oversized_body(client: AsyncClient) ->
     resp = await client.post("/echo", content=payload)
     assert resp.status_code == 413
     assert "too large" in resp.json()["detail"].lower()
+
+
+async def test_content_size_limit_rejects_invalid_content_length(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/echo",
+        content=b"small",
+        headers={"content-length": "not-a-number"},
+    )
+    assert resp.status_code == 400
+    assert "content-length" in resp.json()["detail"].lower()
+
+
+async def test_content_size_limit_rejects_negative_content_length(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/echo",
+        content=b"small",
+        headers={"content-length": "-1"},
+    )
+    assert resp.status_code == 400
 
 
 async def test_content_size_limit_rejects_via_content_length_header(client: AsyncClient) -> None:
@@ -94,6 +115,15 @@ async def test_readyz_reports_ok_when_deps_healthy() -> None:
     assert body == {"status": "ok", "checks": {"db": "ok", "redis": "ok"}}
 
 
+async def test_readyz_reports_degraded_when_db_oserror() -> None:
+    redis = MagicMock()
+    redis.ping = AsyncMock(return_value=True)
+    body, status = await _run_readiness_checks(_FakeEngine(raises=OSError(111, "db down")), redis)
+    assert status == 503
+    assert body["checks"]["db"] == "error"
+    assert body["checks"]["redis"] == "ok"
+
+
 async def test_readyz_reports_degraded_when_deps_missing() -> None:
     body, status = await _run_readiness_checks(None, None)
     assert status == 503
@@ -104,7 +134,7 @@ async def test_readyz_reports_degraded_when_deps_missing() -> None:
 async def test_readyz_reports_degraded_when_db_fails() -> None:
     redis = MagicMock()
     redis.ping = AsyncMock(return_value=True)
-    body, status = await _run_readiness_checks(_FakeEngine(raises=RuntimeError("db down")), redis)
+    body, status = await _run_readiness_checks(_FakeEngine(raises=SQLAlchemyError("db down")), redis)
     assert status == 503
     assert body["checks"]["db"] == "error"
     assert body["checks"]["redis"] == "ok"
@@ -112,7 +142,7 @@ async def test_readyz_reports_degraded_when_db_fails() -> None:
 
 async def test_readyz_reports_degraded_when_redis_fails() -> None:
     redis = MagicMock()
-    redis.ping = AsyncMock(side_effect=RuntimeError("redis down"))
+    redis.ping = AsyncMock(side_effect=RedisError("redis down"))
     body, status = await _run_readiness_checks(_FakeEngine(), redis)
     assert status == 503
     assert body["checks"]["db"] == "ok"

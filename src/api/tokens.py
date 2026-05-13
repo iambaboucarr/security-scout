@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import AgentActionLog, ApiToken, ApiTokenScope
@@ -140,9 +141,22 @@ async def revoke_token(
     return record
 
 
+async def list_tokens(
+    session: AsyncSession,
+    *,
+    include_revoked: bool = False,
+) -> list[ApiToken]:
+    stmt = select(ApiToken).order_by(ApiToken.created_at.desc(), ApiToken.id)
+    if not include_revoked:
+        stmt = stmt.where(ApiToken.revoked_at.is_(None))
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 __all__ = [
     "IssuedToken",
     "create_token",
     "hash_token",
+    "list_tokens",
     "revoke_token",
 ]

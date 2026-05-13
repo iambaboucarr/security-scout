@@ -16,6 +16,7 @@ from api.tokens import create_token, hash_token
 from api.v1 import create_v1_router
 from db import create_engine, create_session_factory, session_scope
 from models import ApiToken, ApiTokenScope, Base, Finding, FindingStatus, Severity, SSVCAction, WorkflowKind
+from tools.queries import FINDINGS_LIST_MAX_LIMIT
 
 
 @pytest.fixture
@@ -98,6 +99,30 @@ async def test_findings_list_returns_data(
     assert data[0]["id"] == str(populated_finding)
     assert data[0]["severity"] == "high"
     assert data[0]["title"] == "Sample finding"
+
+
+async def test_findings_list_limit_above_max_returns_422(
+    findings_client: AsyncClient,
+    read_token: str,
+) -> None:
+    resp = await findings_client.get(
+        "/api/v1/findings",
+        params={"repo": "acme/app", "limit": FINDINGS_LIST_MAX_LIMIT + 1},
+        headers={"Authorization": f"Bearer {read_token}"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_findings_list_limit_zero_returns_422(
+    findings_client: AsyncClient,
+    read_token: str,
+) -> None:
+    resp = await findings_client.get(
+        "/api/v1/findings",
+        params={"repo": "acme/app", "limit": 0},
+        headers={"Authorization": f"Bearer {read_token}"},
+    )
+    assert resp.status_code == 422
 
 
 async def test_findings_list_write_scope_rejected(

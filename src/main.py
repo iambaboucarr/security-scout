@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -10,7 +11,9 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -40,9 +43,14 @@ class ContentSizeLimitMiddleware:
             return
 
         content_length = self._header_value(scope, b"content-length")
-        if content_length is not None and int(content_length) > self._max_bytes:
-            await self._send_413(send)
-            return
+        if content_length is not None:
+            parsed = self._parse_content_length_bytes(content_length)
+            if parsed is None:
+                await self._send_400(send, "Invalid Content-Length")
+                return
+            if parsed > self._max_bytes:
+                await self._send_413(send)
+                return
 
         received = 0
 
@@ -70,12 +78,34 @@ class ContentSizeLimitMiddleware:
         return None
 
     @staticmethod
-    async def _send_413(send: Send) -> None:
-        body = b'{"detail":"Request body too large"}'
+    def _parse_content_length_bytes(raw: bytes) -> int | None:
+        """Return a non-negative length, or ``None`` if *raw* is unusable."""
+        try:
+            as_ascii = raw.decode("ascii").strip()
+        except UnicodeDecodeError:
+            return None
+        if not as_ascii:
+            return None
+        try:
+            n = int(as_ascii)
+        except ValueError:
+            return None
+        if n < 0:
+            return None
+        return n
+
+    @staticmethod
+    async def _send_json(
+        send: Send,
+        *,
+        status: int,
+        detail: str,
+    ) -> None:
+        body = json.dumps({"detail": detail}).encode()
         await send(
             {
                 "type": "http.response.start",
-                "status": 413,
+                "status": status,
                 "headers": [
                     [b"content-type", b"application/json"],
                     [b"content-length", str(len(body)).encode()],
@@ -83,6 +113,14 @@ class ContentSizeLimitMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    async def _send_400(send: Send, detail: str) -> None:
+        await ContentSizeLimitMiddleware._send_json(send, status=400, detail=detail)
+
+    @staticmethod
+    async def _send_413(send: Send) -> None:
+        await ContentSizeLimitMiddleware._send_json(send, status=413, detail="Request body too large")
 
 
 class _BodyTooLarge(Exception):
@@ -101,7 +139,7 @@ async def _run_readiness_checks(engine: Any, redis_pool: Any) -> tuple[dict[str,
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
             checks["db"] = "ok"
-        except Exception:
+        except SQLAlchemyError, OSError:
             _LOG.warning("readyz_db_check_failed", exc_info=True)
             checks["db"] = "error"
             ok = False
@@ -113,7 +151,7 @@ async def _run_readiness_checks(engine: Any, redis_pool: Any) -> tuple[dict[str,
         try:
             await redis_pool.ping()
             checks["redis"] = "ok"
-        except Exception:
+        except RedisError:
             _LOG.warning("readyz_redis_check_failed", exc_info=True)
             checks["redis"] = "error"
             ok = False
