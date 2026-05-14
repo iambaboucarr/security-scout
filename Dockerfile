@@ -1,5 +1,5 @@
-# Builder — uv with Python 3.14 (bookworm-slim, multi-arch)
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim@sha256:7cf77f594be8042dab6daa9fe326f90962252268b4f120a7f5dccce4d947e6c1 AS builder
+# Builder — uv with Python 3.14 (trixie-slim, multi-arch)
+FROM ghcr.io/astral-sh/uv:python3.14-trixie-slim@sha256:8090f78a8865a8fce78ec0bce3177648879148fb22c6dfc4cc0de51f15aea107 AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -14,8 +14,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=README.md,target=README.md \
     uv sync --frozen --no-install-project --no-dev
 
-# Runtime — Python 3.14.4 (bookworm-slim, multi-arch)
-FROM python@sha256:0ba001803c72c128063cfa88863755f905cefabe73c026c66a5a86d8f1d63e98 AS runtime
+# Runtime — Python 3.14 (slim-trixie, multi-arch)
+FROM python:3.14-slim@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
