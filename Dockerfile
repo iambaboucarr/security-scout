@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
 
 # Runtime — Python 3.14.4 (bookworm-slim, multi-arch)
-FROM python@sha256:0ba001803c72c128063cfa88863755f905cefabe73c026c66a5a86d8f1d63e98 AS runtime
+FROM python@sha256:6928095b5c67225857e608dd95271a81e8bb134e4bf7e7c305a9cdc2502a1d06 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
